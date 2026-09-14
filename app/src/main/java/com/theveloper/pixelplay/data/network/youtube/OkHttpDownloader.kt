@@ -71,7 +71,6 @@ class OkHttpDownloader private constructor(
         }
 
         val body: ResponseBody? = response.body
-
         var responseBodyToReturn: String? = null
 
         if (body != null) {
