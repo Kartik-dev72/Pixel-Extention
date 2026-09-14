@@ -17,7 +17,6 @@ class OkHttpDownloader private constructor(
 ) : Downloader() {
 
     companion object {
-
         @Volatile
         private var instance: OkHttpDownloader? = null
 
@@ -27,102 +26,63 @@ class OkHttpDownloader private constructor(
             return instance ?: synchronized(this) {
                 instance ?: OkHttpDownloader(
                     builder
-                        .readTimeout(
-                            30,
-                            TimeUnit.SECONDS
-                        )
-                        .connectTimeout(
-                            30,
-                            TimeUnit.SECONDS
-                        )
+                        .readTimeout(30, TimeUnit.SECONDS)
+                        .connectTimeout(30, TimeUnit.SECONDS)
                         .followRedirects(true)
                         .followSslRedirects(true)
                         .build()
-                ).also {
-                    instance = it
-                }
+                ).also { instance = it }
             }
         }
     }
 
-    @Throws(
-        IOException::class,
-        ReCaptchaException::class
-    )
+    @Throws(IOException::class, ReCaptchaException::class)
     override fun execute(
         request: ExtractorRequest
     ): ExtractorResponse {
 
-        val httpMethod =
-            request.httpMethod()
-
-        val url =
-            request.url()
-
-        val headers =
-            request.headers()
-
-        val dataToSend =
-            request.dataToSend()
+        val dataToSend = request.dataToSend()
 
         val requestBody: RequestBody? =
-            if (dataToSend != null) {
-                RequestBody.create(
-                    null,
-                    dataToSend
-                )
-            } else {
-                null
+            dataToSend?.let {
+                RequestBody.create(null, it)
             }
 
-        val requestBuilder =
-            Request.Builder()
-                .method(
-                    httpMethod,
-                    requestBody
-                )
-                .url(url)
+        val requestBuilder = Request.Builder()
+            .url(request.url())
+            .method(
+                request.httpMethod(),
+                requestBody
+            )
 
-        headers.forEach { (key, values) ->
+        request.headers().forEach { (key, values) ->
             values.forEach { value ->
-                requestBuilder.addHeader(
-                    key,
-                    value
-                )
+                requestBuilder.addHeader(key, value)
             }
         }
 
         val response: Response =
             client
-                .newCall(
-                    requestBuilder.build()
-                )
+                .newCall(requestBuilder.build())
                 .execute()
 
         if (response.code == 429) {
             response.close()
-
             throw ReCaptchaException(
                 "reCaptcha Challenge requested",
-                url
+                request.url()
             )
         }
 
-        val body: ResponseBody? =
-            response.body
-
-        val responseBody =
-            body?.string()
-
-        val latestUrl =
-            response.request.url.toString()
+        val responseBody: ResponseBody? = response.body
+        val body = responseBody?.string()
 
         return ExtractorResponse(
             response.code,
             response.message,
             response.headers.toMultimap(),
-            responseBody,
-            latestUrl
+            body,
+            response.request.url.toString()
         )
     }
 }
