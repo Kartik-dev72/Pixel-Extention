@@ -5,44 +5,36 @@ import org.schabi.newpipe.extractor.stream.StreamInfoItem
 
 object YouTubeToSongMapper {
 
+    private const val YOUTUBE_PREFIX = "youtube_"
+
+    /**
+     * Converts a NewPipe YouTube search result into a PixelPlayer Song.
+     *
+     * Returns null when a valid YouTube video ID cannot be extracted.
+     */
     fun mapToSong(
-        videoItem: StreamInfoItem
-    ): Song {
+        item: StreamInfoItem
+    ): Song? {
+        val videoId = extractVideoIdFromUrl(item.url)
+            ?: return null
 
-        val artist =
-            videoItem.uploaderName
-                ?: "Unknown Artist"
-
-        val videoId =
-            extractVideoIdFromUrl(
-                videoItem.url
-            ) ?: "unknown"
-
-        val songId =
-            "youtube_$videoId"
-
-        val durationMs =
-            videoItem.duration * 1000L
-
-        val thumbnailUrl =
-            videoItem.thumbnails
-                .maxByOrNull { it.height }
-                ?.url
-                ?: ""
+        val thumbnailUrl = item.thumbnails
+            .maxByOrNull { it.height }
+            ?.url
 
         return Song(
-            id = songId,
-            title = videoItem.name,
-            artist = artist,
+            id = "$YOUTUBE_PREFIX$videoId",
+            title = item.name,
+            artist = item.uploaderName ?: "YouTube",
             artistId = -1L,
             artists = emptyList(),
             album = "YouTube",
             albumId = -1L,
             albumArtist = null,
             path = "",
-            contentUriString = "",
+            contentUriString = "youtube://$videoId",
             albumArtUriString = thumbnailUrl,
-            duration = durationMs,
+            duration = item.duration * 1000L,
             genre = null,
             lyrics = null,
             isFavorite = false,
@@ -50,8 +42,8 @@ object YouTubeToSongMapper {
             discNumber = null,
             year = 0,
             dateAdded = System.currentTimeMillis(),
-            dateModified = 0,
-            mimeType = null,
+            dateModified = 0L,
+            mimeType = "audio/*",
             bitrate = null,
             sampleRate = null,
             telegramFileId = null,
@@ -64,93 +56,117 @@ object YouTubeToSongMapper {
         )
     }
 
+    /**
+     * Converts multiple NewPipe search results into Songs.
+     * Invalid/non-YouTube results are discarded.
+     */
     fun mapToSongs(
-        videoItems: List<StreamInfoItem>
+        items: List<StreamInfoItem>
     ): List<Song> {
-        return videoItems.mapNotNull { item ->
-            runCatching {
-                mapToSong(item)
-            }.getOrNull()
-        }
+        return items.mapNotNull(::mapToSong)
     }
 
+    /**
+     * Extracts the YouTube video ID from a PixelPlayer YouTube song ID.
+     *
+     * Example:
+     * youtube_dQw4w9WgXcQ -> dQw4w9WgXcQ
+     */
     fun extractVideoId(
         songId: String
     ): String? {
-        return if (
-            songId.startsWith("youtube_")
-        ) {
-            songId.removePrefix(
-                "youtube_"
-            )
-        } else {
-            null
-        }
+        return songId
+            .takeIf { it.startsWith(YOUTUBE_PREFIX) }
+            ?.removePrefix(YOUTUBE_PREFIX)
+            ?.takeIf { isValidVideoId(it) }
     }
 
+    /**
+     * Returns true when the Song represents a YouTube track.
+     */
     fun isYouTubeSong(
         song: Song
     ): Boolean {
-        return song.id.startsWith(
-            "youtube_"
-        )
+        return song.id.startsWith(YOUTUBE_PREFIX) &&
+            extractVideoId(song.id) != null
     }
 
-    private fun extractVideoIdFromUrl(
+    /**
+     * Extracts an 11-character YouTube video ID from common YouTube URLs.
+     *
+     * Supported:
+     * - https://www.youtube.com/watch?v=VIDEO_ID
+     * - https://youtube.com/watch?v=VIDEO_ID
+     * - https://music.youtube.com/watch?v=VIDEO_ID
+     * - https://youtu.be/VIDEO_ID
+     * - https://www.youtube.com/shorts/VIDEO_ID
+     */
+    fun extractVideoIdFromUrl(
         url: String
     ): String? {
+        val trimmedUrl = url.trim()
 
-        return try {
+        if (trimmedUrl.isEmpty()) {
+            return null
+        }
+
+        return runCatching {
+            val uri = android.net.Uri.parse(trimmedUrl)
+
+            val host = uri.host?.lowercase() ?: return@runCatching null
+            val path = uri.path.orEmpty()
 
             when {
-
-                url.contains(
-                    "youtube.com/watch?v="
-                ) -> {
-                    url.substringAfter(
-                        "v="
-                    ).substringBefore(
-                        "&"
-                    )
+                host == "youtu.be" -> {
+                    path
+                        .removePrefix("/")
+                        .substringBefore("/")
+                        .takeIf(::isValidVideoId)
                 }
 
-                url.contains(
-                    "youtu.be/"
-                ) -> {
-                    url.substringAfter(
-                        "youtu.be/"
-                    ).substringBefore(
-                        "?"
-                    )
+                host == "youtube.com" ||
+                    host == "www.youtube.com" ||
+                    host == "m.youtube.com" ||
+                    host == "music.youtube.com" -> {
+
+                    val queryVideoId = uri
+                        .getQueryParameter("v")
+                        ?.takeIf(::isValidVideoId)
+
+                    queryVideoId
+                        ?: extractVideoIdFromPath(path)
                 }
 
-                url.startsWith(
-                    "/watch?v="
-                ) -> {
-                    url.substringAfter(
-                        "v="
-                    ).substringBefore(
-                        "&"
-                    )
-                }
-
-                url.matches(
-                    Regex(
-                        "[a-zA-Z0-9_-]{11}"
-                    )
-                ) -> {
-                    url
-                }
-
-                else -> {
-                    null
-                }
+                else -> null
             }
+        }.getOrNull()
+    }
 
-        } catch (
-            _: Exception
-        ) {
-            null
+    private fun extractVideoIdFromPath(
+        path: String
+    ): String? {
+        val segments = path
+            .split("/")
+            .filter { it.isNotEmpty() }
+
+        if (segments.size < 2) {
+            return null
         }
+
+        return when (segments[0].lowercase()) {
+            "shorts",
+            "embed",
+            "live" -> segments[1].takeIf(::isValidVideoId)
+
+            else -> null
+        }
+    }
+
+    private fun isValidVideoId(
+        videoId: String
+    ): Boolean {
+        return videoId.matches(
+            Regex("[A-Za-z0-9_-]{11}")
+        )
     }
 }
