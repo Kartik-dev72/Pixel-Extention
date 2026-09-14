@@ -94,6 +94,7 @@ class MediaControllerSyncStateHolder @Inject constructor(
     private val castStateHolder: CastStateHolder,
     private val connectivityStateHolder: ConnectivityStateHolder,
     private val themeStateHolder: ThemeStateHolder,
+    private val youTubeExtractorService: YouTubeExtractorService,
     private val lyricsStateHolder: LyricsStateHolder,
     private val sleepTimerStateHolder: SleepTimerStateHolder,
     private val playbackDispatchStateHolder: PlaybackDispatchStateHolder,
