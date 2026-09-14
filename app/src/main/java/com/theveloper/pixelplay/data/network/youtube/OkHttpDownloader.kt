@@ -37,52 +37,55 @@ class OkHttpDownloader private constructor(
     }
 
     @Throws(IOException::class, ReCaptchaException::class)
-    override fun execute(
-        request: ExtractorRequest
-    ): ExtractorResponse {
-
+    override fun execute(request: ExtractorRequest): ExtractorResponse {
+        val httpMethod = request.httpMethod()
+        val url = request.url()
+        val headers = request.headers()
         val dataToSend = request.dataToSend()
 
-        val requestBody: RequestBody? =
-            dataToSend?.let {
-                RequestBody.create(null, it)
-            }
+        var requestBody: RequestBody? = null
+
+        if (dataToSend != null) {
+            requestBody = RequestBody.create(null, dataToSend)
+        }
 
         val requestBuilder = Request.Builder()
-            .url(request.url())
-            .method(
-                request.httpMethod(),
-                requestBody
-            )
+            .method(httpMethod, requestBody)
+            .url(url)
 
-        request.headers().forEach { (key, values) ->
+        headers.forEach { (key, values) ->
             values.forEach { value ->
                 requestBuilder.addHeader(key, value)
             }
         }
 
         val response: Response =
-            client
-                .newCall(requestBuilder.build())
-                .execute()
+            client.newCall(requestBuilder.build()).execute()
 
         if (response.code == 429) {
             response.close()
             throw ReCaptchaException(
                 "reCaptcha Challenge requested",
-                request.url()
+                url
             )
         }
 
-        val responseBody: ResponseBody? = response.body
-        val body = responseBody?.string()
+        val body: ResponseBody? = response.body
+
+        var responseBodyToReturn: String? = null
+
+        if (body != null) {
+            responseBodyToReturn = body.string()
+        }
+
+        val latestUrl = response.request.url.toString()
 
         return ExtractorResponse(
             response.code,
             response.message,
             response.headers.toMultimap(),
-            body,
-            response.request.url.toString()
+            responseBodyToReturn,
+            latestUrl
         )
     }
 }
