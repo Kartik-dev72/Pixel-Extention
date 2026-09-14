@@ -163,6 +163,15 @@
 # Ktor & Netty Rules (Crucial for StreamProxy)
 -keep class org.slf4j.** { *; }
 
+# jsoup's optional re2j regex backend isn't on the Android classpath — unused fallback path
+-dontwarn com.google.re2j.**
+
+# Rhino's java.beans-based JSON conversion is a desktop-only fallback — unused on Android
+-dontwarn java.beans.**
+
+# Suppresses the ScriptEngineFactory service-loader warning from Rhino/jsoup jars
+-dontwarn javax.script.**
+
 # Ktor Specific
 -dontwarn io.ktor.**
 -dontwarn kotlinx.coroutines.**
