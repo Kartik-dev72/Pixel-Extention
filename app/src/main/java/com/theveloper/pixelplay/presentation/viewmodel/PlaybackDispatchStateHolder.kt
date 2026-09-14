@@ -909,33 +909,93 @@ class PlaybackDispatchStateHolder @Inject constructor(
         }
     }
 
-    suspend fun buildResolvedPlaybackMediaItem(song: Song): MediaItem {
-        val mediaItem = MediaItemBuilder.build(song)
-        val originalUri = mediaItem.localConfiguration?.uri ?: return mediaItem
-        val scheme = originalUri.scheme
-        if (
-            scheme != "telegram" &&
-            scheme != "netease" &&
-            scheme != "qqmusic" &&
-            scheme != "navidrome" &&
-            scheme != "jellyfin" &&
-            scheme != "gdrive"
-        ) {
-            return mediaItem
-        }
+suspend fun buildResolvedPlaybackMediaItem(song: Song): MediaItem {
+    val mediaItem = MediaItemBuilder.build(song)
 
-        if (scheme == "telegram") {
-            cb.ensureTelegramObservers()
-        }
+    /*
+     * YouTube songs do not have a playable contentUriString.
+     *
+     * Their IDs are stored as:
+     *     youtube_<videoId>
+     *
+     * Resolve that ID into a direct audio URL before Media3 receives
+     * the MediaItem. This is the same extraction system used by
+     * PixelPlayer-Plus.
+     */
+    if (YouTubeToSongMapper.isYouTubeSong(song)) {
+        val videoId = YouTubeToSongMapper.extractVideoId(song.id)
 
-        val resolvedUri = dualPlayerEngine.resolveCloudUri(originalUri)
-        return if (resolvedUri == originalUri) {
-            mediaItem
+        if (!videoId.isNullOrBlank()) {
+            Timber.d(
+                "YouTube playback: resolving stream for videoId=%s",
+                videoId
+            )
+
+            val streamResult = youTubeExtractorService.getStreamUrl(videoId)
+
+            if (streamResult.isSuccess) {
+                val streamUrl = streamResult.getOrNull()
+
+                if (!streamUrl.isNullOrBlank()) {
+                    Timber.d(
+                        "YouTube playback: resolved stream URL successfully for %s",
+                        videoId
+                    )
+
+                    return mediaItem
+                        .buildUpon()
+                        .setUri(streamUrl)
+                        .build()
+                }
+            }
+
+            Timber.e(
+                streamResult.exceptionOrNull(),
+                "YouTube playback: failed to resolve stream for videoId=%s",
+                videoId
+            )
         } else {
-            mediaItem.buildUpon().setUri(resolvedUri).build()
+            Timber.e(
+                "YouTube playback: invalid YouTube song ID: %s",
+                song.id
+            )
         }
+
+        return mediaItem
     }
 
+    /*
+     * Existing cloud playback resolution.
+     */
+    val originalUri = mediaItem.localConfiguration?.uri ?: return mediaItem
+    val scheme = originalUri.scheme
+
+    if (
+        scheme != "telegram" &&
+        scheme != "netease" &&
+        scheme != "qqmusic" &&
+        scheme != "navidrome" &&
+        scheme != "jellyfin" &&
+        scheme != "gdrive"
+    ) {
+        return mediaItem
+    }
+
+    if (scheme == "telegram") {
+        cb.ensureTelegramObservers()
+    }
+
+    val resolvedUri = dualPlayerEngine.resolveCloudUri(originalUri)
+
+    return if (resolvedUri == originalUri) {
+        mediaItem
+    } else {
+        mediaItem
+            .buildUpon()
+            .setUri(resolvedUri)
+            .build()
+    }
+}
     fun loadAndPlaySong(song: Song) {
         cancelPendingFullQueuePlayback()
         beginPreparingSong(song)
