@@ -96,6 +96,7 @@ class PlaybackDispatchStateHolder @Inject constructor(
     private val castTransferStateHolder: CastTransferStateHolder,
     private val connectivityStateHolder: ConnectivityStateHolder,
     private val themeStateHolder: ThemeStateHolder,
+    private val youTubeExtractorService: YouTubeExtractorService,
     @param:ApplicationContext private val context: Context,
 ) {
 
