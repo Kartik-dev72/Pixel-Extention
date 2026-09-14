@@ -5,168 +5,260 @@ import org.schabi.newpipe.extractor.stream.StreamInfoItem
 
 object YouTubeToSongMapper {
 
-    private const val YOUTUBE_PREFIX = "youtube_"
+    private val musicTitleSignals = listOf(
+        "song",
+        "official audio",
+        "official video",
+        "music video",
+        "lyric",
+        "lyrics",
+        "audio",
+        "remix",
+        "cover",
+        "acoustic",
+        "live performance",
+        "theme",
+        "ost",
+        "soundtrack",
+        "jukebox",
+        "album",
+        "single"
+    )
 
-    /**
-     * Converts a NewPipe YouTube search result into a PixelPlayer Song.
-     *
-     * Returns null when a valid YouTube video ID cannot be extracted.
-     */
-    fun mapToSong(
-        item: StreamInfoItem
-    ): Song? {
-        val videoId = extractVideoIdFromUrl(item.url)
-            ?: return null
+    private val musicUploaderSignals = listOf(
+        "vevo",
+        "records",
+        "music",
+        "t-series",
+        "sony music",
+        "zee music",
+        "saregama",
+        "tips",
+        "label"
+    )
 
-        val thumbnailUrl = item.thumbnails
-            .maxByOrNull { it.height }
-            ?.url
+    private val nonMusicSignals = listOf(
+        "trailer",
+        "teaser",
+        "episode",
+        "full movie",
+        "movie scene",
+        "scene",
+        "review",
+        "reaction",
+        "interview",
+        "news",
+        "podcast",
+        "vlog",
+        "comedy",
+        "stand up",
+        "gaming",
+        "gameplay",
+        "tutorial",
+        "explained",
+        "shorts",
+        "#shorts"
+    )
+
+    fun mapToSong(videoItem: StreamInfoItem): Song {
+
+        val artist =
+            videoItem.uploaderName ?: "Unknown Artist"
+
+        val videoId =
+            extractVideoIdFromUrl(videoItem.url)
+                ?: "unknown"
+
+        val songId = "youtube_$videoId"
+
+        val durationMs =
+            videoItem.duration * 1000L
+
+        val thumbnailUrl =
+            videoItem.thumbnails
+                .maxByOrNull { it.height }
+                ?.url ?: ""
 
         return Song(
-            id = "$YOUTUBE_PREFIX$videoId",
-            title = item.name,
-            artist = item.uploaderName ?: "YouTube",
+            id = songId,
+            title = videoItem.name,
+            artist = artist,
             artistId = -1L,
             artists = emptyList(),
             album = "YouTube",
             albumId = -1L,
             albumArtist = null,
             path = "",
-            contentUriString = "youtube://$videoId",
+            contentUriString = "",
             albumArtUriString = thumbnailUrl,
-            duration = item.duration * 1000L,
+            duration = durationMs,
             genre = null,
             lyrics = null,
             isFavorite = false,
             trackNumber = 0,
-            discNumber = null,
             year = 0,
             dateAdded = System.currentTimeMillis(),
-            dateModified = 0L,
-            mimeType = "audio/*",
+            mimeType = null,
             bitrate = null,
-            sampleRate = null,
-            telegramFileId = null,
-            telegramChatId = null,
-            neteaseId = null,
-            gdriveFileId = null,
-            qqMusicMid = null,
-            navidromeId = null,
-            jellyfinId = null
+            sampleRate = null
         )
     }
 
-    /**
-     * Converts multiple NewPipe search results into Songs.
-     * Invalid/non-YouTube results are discarded.
-     */
     fun mapToSongs(
-        items: List<StreamInfoItem>
+        videoItems: List<StreamInfoItem>
     ): List<Song> {
-        return items.mapNotNull(::mapToSong)
+
+        return videoItems
+            .filter(::isLikelyMusicContent)
+            .mapNotNull { item ->
+                try {
+                    mapToSong(item)
+                } catch (_: Exception) {
+                    null
+                }
+            }
     }
 
-    /**
-     * Extracts the YouTube video ID from a PixelPlayer YouTube song ID.
-     *
-     * Example:
-     * youtube_dQw4w9WgXcQ -> dQw4w9WgXcQ
-     */
+    fun isLikelyMusicContent(
+        videoItem: StreamInfoItem
+    ): Boolean {
+
+        val title =
+            videoItem.name.lowercase()
+
+        val uploader =
+            (videoItem.uploaderName ?: "").lowercase()
+
+        val durationSeconds =
+            videoItem.duration
+
+        if (
+            videoItem.isShortFormContent ||
+            durationSeconds in 1 until 45
+        ) {
+            return false
+        }
+
+        val hasMusicSignal =
+            musicTitleSignals.any { it in title } ||
+                musicUploaderSignals.any { it in uploader }
+
+        val hasNonMusicSignal =
+            nonMusicSignals.any { it in title }
+
+        if (
+            hasNonMusicSignal &&
+            !hasMusicSignal
+        ) {
+            return false
+        }
+
+        if (
+            durationSeconds > 12 * 60 &&
+            !hasMusicSignal
+        ) {
+            return false
+        }
+
+        return hasMusicSignal ||
+            looksLikeArtistTitle(title) ||
+            durationSeconds in 45..(12 * 60)
+    }
+
+    fun musicSearchQuery(
+        query: String
+    ): String {
+
+        val normalizedQuery =
+            query.trim()
+
+        val lowerQuery =
+            normalizedQuery.lowercase()
+
+        return if (
+            musicTitleSignals.any {
+                it in lowerQuery
+            }
+        ) {
+            normalizedQuery
+        } else {
+            "$normalizedQuery song"
+        }
+    }
+
+    private fun looksLikeArtistTitle(
+        title: String
+    ): Boolean {
+
+        val parts =
+            title.split(" - ", limit = 2)
+
+        return parts.size == 2 &&
+            parts.all {
+                it.trim().length >= 2
+            }
+    }
+
     fun extractVideoId(
         songId: String
     ): String? {
-        return songId
-            .takeIf { it.startsWith(YOUTUBE_PREFIX) }
-            ?.removePrefix(YOUTUBE_PREFIX)
-            ?.takeIf { isValidVideoId(it) }
+
+        return if (
+            songId.startsWith("youtube_")
+        ) {
+            songId.removePrefix("youtube_")
+        } else {
+            null
+        }
     }
 
-    /**
-     * Returns true when the Song represents a YouTube track.
-     */
-    fun isYouTubeSong(
-        song: Song
-    ): Boolean {
-        return song.id.startsWith(YOUTUBE_PREFIX) &&
-            extractVideoId(song.id) != null
-    }
-
-    /**
-     * Extracts an 11-character YouTube video ID from common YouTube URLs.
-     *
-     * Supported:
-     * - https://www.youtube.com/watch?v=VIDEO_ID
-     * - https://youtube.com/watch?v=VIDEO_ID
-     * - https://music.youtube.com/watch?v=VIDEO_ID
-     * - https://youtu.be/VIDEO_ID
-     * - https://www.youtube.com/shorts/VIDEO_ID
-     */
-    fun extractVideoIdFromUrl(
+    private fun extractVideoIdFromUrl(
         url: String
     ): String? {
-        val trimmedUrl = url.trim()
 
-        if (trimmedUrl.isEmpty()) {
-            return null
-        }
-
-        return runCatching {
-            val uri = android.net.Uri.parse(trimmedUrl)
-
-            val host = uri.host?.lowercase() ?: return@runCatching null
-            val path = uri.path.orEmpty()
+        return try {
 
             when {
-                host == "youtu.be" -> {
-                    path
-                        .removePrefix("/")
-                        .substringBefore("/")
-                        .takeIf(::isValidVideoId)
+
+                url.contains(
+                    "youtube.com/watch?v="
+                ) -> {
+                    url.substringAfter("v=")
+                        .substringBefore("&")
                 }
 
-                host == "youtube.com" ||
-                    host == "www.youtube.com" ||
-                    host == "m.youtube.com" ||
-                    host == "music.youtube.com" -> {
+                url.contains(
+                    "youtu.be/"
+                ) -> {
+                    url.substringAfter("youtu.be/")
+                        .substringBefore("?")
+                }
 
-                    val queryVideoId = uri
-                        .getQueryParameter("v")
-                        ?.takeIf(::isValidVideoId)
+                url.startsWith(
+                    "/watch?v="
+                ) -> {
+                    url.substringAfter("v=")
+                        .substringBefore("&")
+                }
 
-                    queryVideoId
-                        ?: extractVideoIdFromPath(path)
+                url.matches(
+                    Regex("[a-zA-Z0-9_-]{11}")
+                ) -> {
+                    url
                 }
 
                 else -> null
             }
-        }.getOrNull()
-    }
 
-    private fun extractVideoIdFromPath(
-        path: String
-    ): String? {
-        val segments = path
-            .split("/")
-            .filter { it.isNotEmpty() }
-
-        if (segments.size < 2) {
-            return null
-        }
-
-        return when (segments[0].lowercase()) {
-            "shorts",
-            "embed",
-            "live" -> segments[1].takeIf(::isValidVideoId)
-
-            else -> null
+        } catch (_: Exception) {
+            null
         }
     }
 
-    private fun isValidVideoId(
-        videoId: String
+    fun isYouTubeSong(
+        song: Song
     ): Boolean {
-        return videoId.matches(
-            Regex("[A-Za-z0-9_-]{11}")
-        )
+
+        return song.id.startsWith("youtube_")
     }
 }
