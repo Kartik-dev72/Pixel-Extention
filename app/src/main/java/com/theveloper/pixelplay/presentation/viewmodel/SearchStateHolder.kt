@@ -3,43 +3,47 @@ package com.theveloper.pixelplay.presentation.viewmodel
 import com.theveloper.pixelplay.data.model.SearchFilterType
 import com.theveloper.pixelplay.data.model.SearchHistoryItem
 import com.theveloper.pixelplay.data.model.SearchResultItem
+import com.theveloper.pixelplay.data.network.youtube.YouTubeExtractorService
+import com.theveloper.pixelplay.data.network.youtube.YouTubeToSongMapper
 import com.theveloper.pixelplay.data.repository.MusicRepository
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.FlowPreview
 import timber.log.Timber
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlinx.coroutines.FlowPreview
 
 /**
  * Manages search state and operations.
- * Extracted from PlayerViewModel to improve modularity.
  *
  * Responsibilities:
- * - Search query execution
+ * - Local/library search
+ * - YouTube online song search
  * - Search filter management
  * - Search history CRUD operations
  */
 @Singleton
 class SearchStateHolder @Inject constructor(
     private val musicRepository: MusicRepository,
+    private val youTubeExtractorService: YouTubeExtractorService,
 ) {
     private companion object {
         const val SEARCH_DEBOUNCE_MS = 300L
+        const val MAX_YOUTUBE_RESULTS = 15
     }
 
     private data class SearchRequest(
@@ -48,19 +52,26 @@ class SearchStateHolder @Inject constructor(
     )
 
     // Search State
-    private val _searchResults = MutableStateFlow<ImmutableList<SearchResultItem>>(persistentListOf())
+    private val _searchResults =
+        MutableStateFlow<ImmutableList<SearchResultItem>>(persistentListOf())
+
     val searchResults = _searchResults.asStateFlow()
 
-    private val _selectedSearchFilter = MutableStateFlow(SearchFilterType.ALL)
+    private val _selectedSearchFilter =
+        MutableStateFlow(SearchFilterType.ALL)
+
     val selectedSearchFilter = _selectedSearchFilter.asStateFlow()
 
-    private val _searchHistory = MutableStateFlow<ImmutableList<SearchHistoryItem>>(persistentListOf())
+    private val _searchHistory =
+        MutableStateFlow<ImmutableList<SearchHistoryItem>>(persistentListOf())
+
     val searchHistory = _searchHistory.asStateFlow()
 
     private val searchRequests = MutableSharedFlow<SearchRequest>(
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
+
     private val latestSearchRequestId = AtomicLong(0L)
 
     private var scope: CoroutineScope? = null
@@ -77,10 +88,12 @@ class SearchStateHolder @Inject constructor(
     @OptIn(FlowPreview::class)
     private fun observeSearchRequests() {
         searchJob?.cancel()
+
         searchJob = scope?.launch {
             searchRequests
                 .debounce(SEARCH_DEBOUNCE_MS)
                 .collectLatest { request ->
+
                     val normalizedQuery = request.query
 
                     if (normalizedQuery.isBlank()) {
@@ -92,34 +105,173 @@ class SearchStateHolder @Inject constructor(
 
                     try {
                         val currentFilter = _selectedSearchFilter.value
-                        musicRepository.searchAll(normalizedQuery, currentFilter).collect { resultsList ->
-                            // Sort: prioritize Song/Album matches over Artist/Playlist matches
-                            val sortedResults = resultsList.sortedWith(
-                                compareBy { result ->
-                                    when (result) {
-                                        is SearchResultItem.SongItem -> 0
-                                        is SearchResultItem.AlbumItem -> 1
-                                        is SearchResultItem.ArtistItem -> 2
-                                        is SearchResultItem.PlaylistItem -> 3
+
+                        /*
+                         * ============================================================
+                         * LOCAL SEARCH
+                         * ============================================================
+                         */
+
+                        val localResults = withContext(Dispatchers.IO) {
+                            musicRepository
+                                .searchAll(
+                                    normalizedQuery,
+                                    currentFilter
+                                )
+                                .first()
+                        }
+
+                        if (
+                            request.requestId !=
+                            latestSearchRequestId.get()
+                        ) {
+                            return@collectLatest
+                        }
+
+                        val sortedLocalResults = localResults.sortedWith(
+                            compareBy { result ->
+                                when (result) {
+                                    is SearchResultItem.SongItem -> 0
+                                    is SearchResultItem.AlbumItem -> 1
+                                    is SearchResultItem.ArtistItem -> 2
+                                    is SearchResultItem.PlaylistItem -> 3
+                                }
+                            }
+                        )
+
+                        /*
+                         * ============================================================
+                         * YOUTUBE SEARCH
+                         * ============================================================
+                         *
+                         * YouTube is an online SONG provider.
+                         *
+                         * Therefore:
+                         *   ALL   -> local + YouTube
+                         *   SONGS -> local + YouTube
+                         *   other -> local only
+                         */
+
+                        val youtubeResults =
+                            if (
+                                currentFilter == SearchFilterType.ALL ||
+                                currentFilter == SearchFilterType.SONGS
+                            ) {
+                                withContext(Dispatchers.IO) {
+                                    try {
+                                        Timber.d(
+                                            "YouTube search starting for: %s",
+                                            normalizedQuery
+                                        )
+
+                                        val result =
+                                            youTubeExtractorService
+                                                .searchSongs(normalizedQuery)
+
+                                        if (result.isSuccess) {
+                                            val videos =
+                                                result.getOrThrow()
+
+                                            Timber.d(
+                                                "YouTube search returned %d raw results for: %s",
+                                                videos.size,
+                                                normalizedQuery
+                                            )
+
+                                            YouTubeToSongMapper
+                                                .mapToSongs(videos)
+                                                .take(MAX_YOUTUBE_RESULTS)
+                                        } else {
+                                            Timber.w(
+                                                result.exceptionOrNull(),
+                                                "YouTube search failed for: %s",
+                                                normalizedQuery
+                                            )
+
+                                            emptyList()
+                                        }
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        Timber.e(
+                                            e,
+                                            "YouTube search exception for: %s",
+                                            normalizedQuery
+                                        )
+
+                                        emptyList()
                                     }
                                 }
+                            } else {
+                                emptyList()
+                            }
+
+                        if (
+                            request.requestId !=
+                            latestSearchRequestId.get()
+                        ) {
+                            return@collectLatest
+                        }
+
+                        /*
+                         * ============================================================
+                         * MERGE RESULTS
+                         * ============================================================
+                         */
+
+                        val existingSongIds =
+                            sortedLocalResults
+                                .asSequence()
+                                .filterIsInstance<SearchResultItem.SongItem>()
+                                .map { it.song.id }
+                                .toHashSet()
+
+                        val onlineResults =
+                            youtubeResults
+                                .filter { song ->
+                                    song.id !in existingSongIds
+                                }
+                                .map { song ->
+                                    SearchResultItem.SongItem(song)
+                                }
+
+                        val finalResults =
+                            (
+                                sortedLocalResults +
+                                    onlineResults
+                                ).toImmutableList()
+
+                        if (
+                            request.requestId ==
+                            latestSearchRequestId.get()
+                        ) {
+                            _searchResults.value = finalResults
+
+                            Timber.d(
+                                "Search complete: local=%d, youtube=%d, total=%d, query=%s",
+                                sortedLocalResults.size,
+                                onlineResults.size,
+                                finalResults.size,
+                                normalizedQuery
+                            )
+                        }
+
+                    } catch (e: CancellationException) {
+                        // A newer search request replaced this one.
+                        throw e
+                    } catch (e: Exception) {
+                        if (
+                            request.requestId ==
+                            latestSearchRequestId.get()
+                        ) {
+                            Timber.e(
+                                e,
+                                "Error performing search for query: %s",
+                                normalizedQuery
                             )
 
-                            if (request.requestId != latestSearchRequestId.get()) {
-                                return@collect
-                            }
-
-                            val immutableResults = sortedResults.toImmutableList()
-                            if (_searchResults.value != immutableResults) {
-                                _searchResults.value = immutableResults
-                            }
-                        }
-                    } catch (_: CancellationException) {
-                        // Superseded by a newer query; ignore.
-                    } catch (e: Exception) {
-                        if (request.requestId == latestSearchRequestId.get()) {
-                            Timber.e(e, "Error performing search for query: $normalizedQuery")
-                            _searchResults.value = persistentListOf()
+                            _searchResults.value =
+                                persistentListOf()
                         }
                     }
                 }
@@ -136,9 +288,15 @@ class SearchStateHolder @Inject constructor(
                 val history = withContext(Dispatchers.IO) {
                     musicRepository.getRecentSearchHistory(limit)
                 }
-                _searchHistory.value = history.toImmutableList()
+
+                _searchHistory.value =
+                    history.toImmutableList()
+
             } catch (e: Exception) {
-                Timber.e(e, "Error loading search history")
+                Timber.e(
+                    e,
+                    "Error loading search history"
+                )
             }
         }
     }
@@ -150,9 +308,14 @@ class SearchStateHolder @Inject constructor(
                     withContext(Dispatchers.IO) {
                         musicRepository.addSearchHistoryItem(query)
                     }
+
                     loadSearchHistory()
+
                 } catch (e: Exception) {
-                    Timber.e(e, "Error adding search history item")
+                    Timber.e(
+                        e,
+                        "Error adding search history item"
+                    )
                 }
             }
         }
@@ -161,26 +324,40 @@ class SearchStateHolder @Inject constructor(
     fun performSearch(query: String) {
         val normalizedQuery = query.trim()
 
-        val requestId = latestSearchRequestId.incrementAndGet()
+        val requestId =
+            latestSearchRequestId.incrementAndGet()
 
         if (normalizedQuery.isBlank()) {
             if (_searchResults.value.isNotEmpty()) {
-                _searchResults.value = persistentListOf()
+                _searchResults.value =
+                    persistentListOf()
             }
         }
 
-        searchRequests.tryEmit(SearchRequest(normalizedQuery, requestId))
+        searchRequests.tryEmit(
+            SearchRequest(
+                query = normalizedQuery,
+                requestId = requestId
+            )
+        )
     }
 
     fun deleteSearchHistoryItem(query: String) {
         scope?.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    musicRepository.deleteSearchHistoryItemByQuery(query)
+                    musicRepository.deleteSearchHistoryItemByQuery(
+                        query
+                    )
                 }
+
                 loadSearchHistory()
+
             } catch (e: Exception) {
-                Timber.e(e, "Error deleting search history item")
+                Timber.e(
+                    e,
+                    "Error deleting search history item"
+                )
             }
         }
     }
@@ -191,9 +368,15 @@ class SearchStateHolder @Inject constructor(
                 withContext(Dispatchers.IO) {
                     musicRepository.clearSearchHistory()
                 }
-                _searchHistory.value = persistentListOf()
+
+                _searchHistory.value =
+                    persistentListOf()
+
             } catch (e: Exception) {
-                Timber.e(e, "Error clearing search history")
+                Timber.e(
+                    e,
+                    "Error clearing search history"
+                )
             }
         }
     }
