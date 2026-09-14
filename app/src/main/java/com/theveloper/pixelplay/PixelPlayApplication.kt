@@ -17,6 +17,7 @@ import com.theveloper.pixelplay.data.preferences.UserPreferencesRepository
 import com.theveloper.pixelplay.data.diagnostics.AdvancedPerformanceDiagnosticsController
 import com.theveloper.pixelplay.data.repository.ArtistImageRepository
 import com.theveloper.pixelplay.data.telegram.TelegramRepository
+import com.theveloper.pixelplay.data.network.youtube.OkHttpDownloader
 import com.theveloper.pixelplay.presentation.viewmodel.LibraryStateHolder
 import com.theveloper.pixelplay.presentation.viewmodel.ThemeStateHolder
 import com.theveloper.pixelplay.utils.AlbumArtCacheManager
@@ -30,6 +31,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import org.schabi.newpipe.extractor.NewPipe
 import timber.log.Timber
 import javax.inject.Inject
 
@@ -74,9 +76,9 @@ class PixelPlayApplication : Application(), ImageLoaderFactory, Configuration.Pr
 
     private val startupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    // AÑADE EL COMPANION OBJECT
     companion object {
         const val NOTIFICATION_CHANNEL_ID = "pixelplay_music_channel"
+
         lateinit var instance: PixelPlayApplication
             private set
     }
@@ -94,6 +96,18 @@ class PixelPlayApplication : Application(), ImageLoaderFactory, Configuration.Pr
     override fun onCreate() {
         instance = this
         super.onCreate()
+
+        /*
+         * Initialize NewPipe before any YouTube search or playback request.
+         * This is required by YouTubeExtractorService.
+         */
+        try {
+            val downloader = OkHttpDownloader.getInstance()
+            NewPipe.init(downloader)
+            Timber.d("NewPipe initialized successfully")
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to initialize NewPipe")
+        }
 
         // Benchmark variant intentionally restarts/kills app process during tests.
         // Avoid persisting those events as user-facing crash reports.
@@ -114,18 +128,24 @@ class PixelPlayApplication : Application(), ImageLoaderFactory, Configuration.Pr
                 "PixelPlayer Music Playback",
                 NotificationManager.IMPORTANCE_LOW
             )
-            val notificationManager = getSystemService(NotificationManager::class.java)
+
+            val notificationManager =
+                getSystemService(NotificationManager::class.java)
+
             notificationManager.createNotificationChannel(channel)
         }
 
         ProcessLifecycleOwner.get().lifecycle.addObserver(appLifecycleObserver)
+
         advancedPerformanceDiagnosticsController.get().start(startupScope)
 
         startupScope.launch {
             AlbumArtUtils.migrateLegacyCacheLocation(this@PixelPlayApplication)
+
             val savedLimit = runCatching {
                 userPreferencesRepository.get().albumArtCacheLimitMbFlow.first()
             }.getOrNull()
+
             if (savedLimit != null) {
                 AlbumArtCacheManager.configuredCacheLimitMb = savedLimit.toLong()
             }
@@ -177,10 +197,8 @@ class PixelPlayApplication : Application(), ImageLoaderFactory, Configuration.Pr
         }
     }
 
-    // 3. Sobrescribe el método para proveer la configuración de WorkManager
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
             .setWorkerFactory(workerFactory)
             .build()
-
 }
