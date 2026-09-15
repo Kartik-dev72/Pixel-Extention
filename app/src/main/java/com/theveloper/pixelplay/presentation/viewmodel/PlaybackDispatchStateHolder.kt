@@ -116,6 +116,17 @@ class PlaybackDispatchStateHolder @Inject constructor(
     private var pendingQueueSegmentsJob: Job? = null
     private var remoteQueueLoadJob: Job? = null
 
+    private data class YouTubeStreamCacheEntry(
+    val url: String,
+    val expiresAtMs: Long
+)
+
+private val youtubeStreamCache = ConcurrentHashMap<String, YouTubeStreamCacheEntry>()
+
+private companion object {
+    const val YOUTUBE_STREAM_CACHE_TTL_MS = 25 * 60 * 1000L
+}
+
     // Playback action parked until the MediaController finishes connecting.
     private var pendingPlaybackAction: (() -> Unit)? = null
 
