@@ -90,6 +90,7 @@ class YouTubeExtractorService @Inject constructor(
                 )
 
                 Result.success(items)
+
             } catch (e: Exception) {
                 Timber.e(
                     e,
@@ -298,12 +299,15 @@ class YouTubeExtractorService @Inject constructor(
      *
      * Order:
      *
-     * 1. Piped
-     * 2. NewPipe
+     * 1. NewPipe
+     * 2. Piped
      * 3. yt-dlp if actually installed
      *
-     * Piped comes first because the current log shows NewPipe returning
-     * zero audio streams.
+     * NewPipe is first because NewPipe 0.26.5 is now confirmed
+     * to successfully resolve YouTube playback.
+     *
+     * This avoids waiting for unreliable Piped instances before
+     * reaching the working extractor.
      */
     suspend fun getStreamUrl(
         videoUrl: String
@@ -314,66 +318,11 @@ class YouTubeExtractorService @Inject constructor(
 
             /*
              * ============================================================
-             * 1. PIPED
+             * 1. NEWPIPE
              * ============================================================
              */
 
-            try {
-
-                Timber.d(
-                    "YouTubeExtractor: Trying Piped first for $videoUrl"
-                )
-
-                val pipedResult =
-                    pipedStreamService.getStreamUrl(videoUrl)
-
-                if (pipedResult.isSuccess) {
-
-                    val streamUrl =
-                        pipedResult.getOrThrow()
-
-                    if (streamUrl.isNotBlank()) {
-
-                        Timber.d(
-                            "YouTubeExtractor: Piped successfully resolved stream: " +
-                                "${streamUrl.take(120)}..."
-                        )
-
-                        return@withContext Result.success(
-                            streamUrl
-                        )
-                    }
-                }
-
-                lastError =
-                    pipedResult.exceptionOrNull()
-                        as? Exception
-                        ?: Exception(
-                            "Piped failed to resolve stream"
-                        )
-
-                Timber.w(
-                    lastError,
-                    "YouTubeExtractor: Piped failed"
-                )
-
-            } catch (e: Exception) {
-
-                lastError = e
-
-                Timber.e(
-                    e,
-                    "YouTubeExtractor: Error during Piped fallback"
-                )
-            }
-
-            /*
-             * ============================================================
-             * 2. NEWPIPE
-             * ============================================================
-             */
-
-            val maxRetries = 3
+            val maxRetries = 2
 
             repeat(maxRetries) { attempt ->
 
@@ -407,9 +356,7 @@ class YouTubeExtractorService @Inject constructor(
                         )
 
                         if (attempt < maxRetries - 1) {
-                            delay(
-                                1000L * (attempt + 1)
-                            )
+                            delay(500L)
                         }
 
                         return@repeat
@@ -436,21 +383,7 @@ class YouTubeExtractorService @Inject constructor(
                             "${validAudioStreams.size} valid audio streams"
                     )
 
-                    validAudioStreams.forEachIndexed { index, stream ->
-
-                        Timber.d(
-                            "YouTubeExtractor: " +
-                                "Stream $index - " +
-                                "bitrate=${stream.averageBitrate}, " +
-                                "format=${stream.format}, " +
-                                "itag=${stream.itag}"
-                        )
-                    }
-
                     /*
-                     * Do not use the old assumption that >300 kbps
-                     * means a preview.
-                     *
                      * Select the highest available valid audio stream.
                      */
                     val audioStream =
@@ -497,29 +430,76 @@ class YouTubeExtractorService @Inject constructor(
                 }
 
                 if (attempt < maxRetries - 1) {
-                    delay(
-                        1000L * (attempt + 1)
-                    )
+                    delay(500L)
                 }
+            }
+
+            /*
+             * ============================================================
+             * 2. PIPED FALLBACK
+             * ============================================================
+             *
+             * Piped is retained as a fallback rather than being removed.
+             * If NewPipe temporarily fails, Piped can still rescue playback.
+             */
+
+            try {
+
+                Timber.d(
+                    "YouTubeExtractor: NewPipe failed, trying Piped fallback"
+                )
+
+                val pipedResult =
+                    pipedStreamService.getStreamUrl(videoUrl)
+
+                if (pipedResult.isSuccess) {
+
+                    val streamUrl =
+                        pipedResult.getOrThrow()
+
+                    if (streamUrl.isNotBlank()) {
+
+                        Timber.d(
+                            "YouTubeExtractor: Piped successfully resolved stream: " +
+                                "${streamUrl.take(120)}..."
+                        )
+
+                        return@withContext Result.success(
+                            streamUrl
+                        )
+                    }
+                }
+
+                lastError =
+                    pipedResult.exceptionOrNull()
+                        as? Exception
+                        ?: Exception(
+                            "Piped failed to resolve stream"
+                        )
+
+                Timber.w(
+                    lastError,
+                    "YouTubeExtractor: Piped fallback failed"
+                )
+
+            } catch (e: Exception) {
+
+                lastError = e
+
+                Timber.e(
+                    e,
+                    "YouTubeExtractor: Error during Piped fallback"
+                )
             }
 
             /*
              * ============================================================
              * 3. YT-DLP
              * ============================================================
-             *
-             * This remains only as a last-resort fallback.
-             *
-             * The current application does NOT bundle yt-dlp, which is
-             * why your previous log showed:
-             *
-             * Cannot run program "yt-dlp"
-             *
-             * We therefore do not rely on this path for normal playback.
              */
 
             Timber.w(
-                "YouTubeExtractor: Piped and NewPipe failed, " +
+                "YouTubeExtractor: NewPipe and Piped failed, " +
                     "checking yt-dlp as final fallback"
             )
 
