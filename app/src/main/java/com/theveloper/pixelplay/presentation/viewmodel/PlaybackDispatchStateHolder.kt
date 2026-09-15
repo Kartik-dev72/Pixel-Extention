@@ -1273,195 +1273,86 @@ class PlaybackDispatchStateHolder @Inject constructor(
                     )
                 }
 
-            val playSongsAction: () -> Unit = {
-                dualPlayerEngine.cancelNext()
+      val startMediaItem = buildResolvedPlaybackMediaItem(effectiveStartSong)
 
-                val enginePlayer =
-                    dualPlayerEngine.masterPlayer
+val nextSong = songsToPlay
+    .dropWhile { it.id != effectiveStartSong.id }
+    .drop(1)
+    .firstOrNull()
 
-                enginePlayer.setMediaItem(
-                    startMediaItem,
-                    0L
+val nextMediaItem = nextSong?.let {
+    buildResolvedPlaybackMediaItem(it)
+}
+
+val playSongsAction = {
+    dualPlayerEngine.cancelNext()
+
+    val enginePlayer = dualPlayerEngine.masterPlayer
+
+    enginePlayer.setMediaItem(startMediaItem, 0L)
+
+    // Guarantee the immediate next song is already playable.
+    if (nextMediaItem != null) {
+        enginePlayer.addMediaItem(nextMediaItem)
+    }
+
+    enginePlayer.prepare()
+    enginePlayer.play()
+
+    cb.updateUiState {
+        it.copy(isLoadingInitialSongs = false)
+    }
+
+    // Resolve and append EVERYTHING after the immediate next song.
+    if (songsToPlay.size > 2) {
+        pendingQueueSegmentsJob?.cancel()
+
+        pendingQueueSegmentsJob = cb.scope.launch {
+            try {
+                val startIndex = songsToPlay.indexOfFirst {
+                    it.id == effectiveStartSong.id
+                }
+
+                if (startIndex < 0) return@launch
+
+                val remainingSongs = songsToPlay
+                    .drop(startIndex + 2)
+
+                if (remainingSongs.isEmpty()) return@launch
+
+                val resolvedRemaining = ArrayList<MediaItem>(
+                    remainingSongs.size
                 )
 
-                /*
-                 * Put the already-resolved immediate next item into the
-                 * player before prepare/play.
-                 */
-                if (immediateNextMediaItem != null) {
-                    enginePlayer.addMediaItem(
-                        immediateNextMediaItem
-                    )
+                for (song in remainingSongs) {
+                    val resolved = buildResolvedPlaybackMediaItem(song)
+                    resolvedRemaining.add(resolved)
+
+                    yield()
                 }
 
-                enginePlayer.prepare()
-                enginePlayer.play()
+                withContext(Dispatchers.Main.immediate) {
+                    val player = dualPlayerEngine.masterPlayer
 
-                cb.updateUiState {
-                    it.copy(
-                        isLoadingInitialSongs = false
-                    )
+                    // Make sure this is still the same queue.
+                    if (
+                        player.currentMediaItem?.mediaId ==
+                            effectiveStartSong.id
+                    ) {
+                        player.addMediaItems(resolvedRemaining)
+                    }
                 }
-
-                /*
-                 * Resolve the remainder of the queue in the background.
-                 *
-                 * The immediate next item is already present, so normal
-                 * playback can transition to it without exposing an
-                 * unresolved YouTube URI to Media3.
-                 */
-                if (songsToPlay.size > 1) {
-                    pendingQueueSegmentsJob?.cancel()
-
-                    pendingQueueSegmentsJob =
-                        cb.scope.launch(Dispatchers.IO) {
-                            val preparedSegments =
-                                preparePlaybackQueueSegments(
-                                    songsToPlay = songsToPlay,
-                                    startSongId =
-                                        effectiveStartSong.id,
-                                    playlistId = playlistId
-                                )
-
-                            /*
-                             * The first after-current item is already in
-                             * the player. Remove it from the background
-                             * segment before attaching to avoid duplication.
-                             */
-                            val remainingAfterCurrent =
-                                if (
-                                    preparedSegments.afterCurrent.isNotEmpty()
-                                ) {
-                                    preparedSegments.afterCurrent
-                                        .drop(1)
-                                } else {
-                                    emptyList()
-                                }
-
-                            val remainingSegments =
-                                preparedSegments.copy(
-                                    afterCurrent =
-                                        remainingAfterCurrent
-                                )
-
-                            withContext(Dispatchers.Main.immediate) {
-                                if (
-                                    enginePlayer.currentMediaItem?.mediaId !=
-                                        effectiveStartSong.id
-                                ) {
-                                    return@withContext
-                                }
-
-                                if (
-                                    enginePlayer.mediaItemCount != 2
-                                ) {
-                                    return@withContext
-                                }
-
-                                if (
-                                    enginePlayer.getMediaItemAt(0).mediaId !=
-                                        effectiveStartSong.id
-                                ) {
-                                    return@withContext
-                                }
-
-                                val batchSize = 200
-
-                                /*
-                                 * Insert items before the current item.
-                                 *
-                                 * These are not normally relevant for the
-                                 * immediate transition, but they preserve
-                                 * the original queue ordering.
-                                 */
-                                if (
-                                    remainingSegments.beforeCurrent.isNotEmpty()
-                                ) {
-                                    var insertedCount = 0
-
-                                    while (
-                                        insertedCount <
-                                            remainingSegments.beforeCurrent.size
-                                    ) {
-                                        val end =
-                                            (
-                                                insertedCount +
-                                                    batchSize
-                                                ).coerceAtMost(
-                                                    remainingSegments
-                                                        .beforeCurrent
-                                                        .size
-                                                )
-
-                                        val batch =
-                                            remainingSegments
-                                                .beforeCurrent
-                                                .subList(
-                                                    insertedCount,
-                                                    end
-                                                )
-
-                                        enginePlayer.addMediaItems(
-                                            insertedCount,
-                                            batch
-                                        )
-
-                                        insertedCount = end
-                                        yield()
-                                    }
-                                }
-
-                                /*
-                                 * The immediate next song already occupies
-                                 * index 1. Insert all remaining songs after it.
-                                 */
-                                if (
-                                    remainingSegments.afterCurrent.isNotEmpty()
-                                ) {
-                                    var insertedCount = 0
-
-                                    while (
-                                        insertedCount <
-                                            remainingSegments.afterCurrent.size
-                                    ) {
-                                        val end =
-                                            (
-                                                insertedCount +
-                                                    batchSize
-                                                ).coerceAtMost(
-                                                    remainingSegments
-                                                        .afterCurrent
-                                                        .size
-                                                )
-
-                                        val batch =
-                                            remainingSegments
-                                                .afterCurrent
-                                                .subList(
-                                                    insertedCount,
-                                                    end
-                                                )
-
-                                        enginePlayer.addMediaItems(
-                                            2 + insertedCount,
-                                            batch
-                                        )
-
-                                        insertedCount = end
-                                        yield()
-                                    }
-                                }
-
-                                playbackStateHolder.updateStablePlayerState {
-                                    it.copy(
-                                        currentMediaItemIndex =
-                                            preparedSegments.currentIndex
-                                    )
-                                }
-                            }
-                        }
-                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Timber.e(
+                    error,
+                    "Failed to append remaining playback queue"
+                )
             }
+        }
+    }
+}
 
             /*
              * We still check for MediaController to ensure the Service is
