@@ -1273,7 +1273,6 @@ class PlaybackDispatchStateHolder @Inject constructor(
                     )
                 }
 
-      val startMediaItem = buildResolvedPlaybackMediaItem(effectiveStartSong)
 
 val nextSong = songsToPlay
     .dropWhile { it.id != effectiveStartSong.id }
