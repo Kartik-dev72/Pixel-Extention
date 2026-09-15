@@ -63,6 +63,7 @@ import com.theveloper.pixelplay.data.navidrome.NavidromeStreamProxy
 import com.theveloper.pixelplay.data.qqmusic.QqMusicStreamProxy
 import androidx.core.net.toUri
 import com.theveloper.pixelplay.data.diagnostics.AdvancedPerformanceDiagnostics
+import com.theveloper.pixelplay.data.network.youtube.YouTubeExtractorService
 
 data class ActiveDecoderInfo(
     val name: String,
@@ -176,8 +177,8 @@ internal data class LoadControlBufferProfile(
 
 /**
  * Picks the buffer profile for the player. On memory-constrained devices the maximum
- * prefetch depth is reduced to cap peak RAM — with time-based buffering the buffered RAM is
- * bitrate × seconds, so a 60 s window on a hi-res lossless track (plus a second buffered
+ * prefetch depth is reduced to cap peak RAM — with time-based buffering the buffered RAM
+ * is bitrate × seconds, so a 60 s window on a hi-res lossless track (plus a second buffered
  * player during a crossfade) can be tens of MB. Shrinking the *time* window (not switching
  * to a byte threshold) keeps start latency and cross-format uniformity identical to the
  * normal profile; only how far ahead we prefetch changes, which is free for local files and
@@ -220,12 +221,13 @@ class DualPlayerEngine @Inject constructor(
     private val navidromeStreamProxy: NavidromeStreamProxy,
     private val jellyfinStreamProxy: com.theveloper.pixelplay.data.jellyfin.JellyfinStreamProxy,
     private val gdriveStreamProxy: com.theveloper.pixelplay.data.gdrive.GDriveStreamProxy,
-    private val youTubeExtractorService: com.theveloper.pixelplay.data.network.youtube.YouTubeExtractorService,
+    private val youTubeExtractorService: YouTubeExtractorService,
     private val telegramCacheManager: com.theveloper.pixelplay.data.telegram.TelegramCacheManager,
     private val connectivityStateHolder: com.theveloper.pixelplay.presentation.viewmodel.ConnectivityStateHolder
 ) {
     private companion object {
         private const val AUDIO_OFFLOAD_STALL_FALLBACK_MS = 4_000L
+
         // Grace window after a crossfade/transition during which the STATE_BUFFERING
         // "HAL offload reset" heuristic is suppressed. Right after the player swap the new
         // master (the former auxiliary) has just started, so a brief buffering blip there
@@ -235,10 +237,29 @@ class DualPlayerEngine @Inject constructor(
         private const val POST_TRANSITION_OFFLOAD_GUARD_MS = 2_000L
         private const val MAX_AUXILIARY_TIMELINE_ITEMS = 200
         private val LOCAL_MEDIA_SCHEMES = setOf("content", "file", "android.resource")
-        private val REMOTE_MEDIA_SCHEMES = setOf("http", "https", "telegram", "netease", "qqmusic", "navidrome", "jellyfin", "gdrive", "youtube")
+        private val REMOTE_MEDIA_SCHEMES = setOf(
+            "http",
+            "https",
+            "telegram",
+            "netease",
+            "qqmusic",
+            "navidrome",
+            "jellyfin",
+            "gdrive",
+            "youtube"
+        )
+
         // Subset of REMOTE_MEDIA_SCHEMES: schemes that need proxy resolution.
         // http/https resolve directly and must NOT enter the resolvedUriCache lookup path.
-        private val CLOUD_PROXY_SCHEMES = setOf("telegram", "netease", "qqmusic", "navidrome", "jellyfin", "gdrive", "youtube")
+        private val CLOUD_PROXY_SCHEMES = setOf(
+            "telegram",
+            "netease",
+            "qqmusic",
+            "navidrome",
+            "jellyfin",
+            "gdrive",
+            "youtube"
+        )
     }
 
     data class TransitionTarget(
@@ -273,7 +294,7 @@ class DualPlayerEngine @Inject constructor(
     fun setOnPlayerAboutToBeReleasedListener(listener: (Player) -> Unit) {
         onPlayerAboutToBeReleasedListener = listener
     }
-    
+
     // Active Audio Session ID Flow
     private val _activeAudioSessionId = MutableStateFlow(0)
     val activeAudioSessionId: StateFlow<Int> = _activeAudioSessionId.asStateFlow()
@@ -287,19 +308,24 @@ class DualPlayerEngine @Inject constructor(
     private var isFocusLossPause = false
     private var lastPlayWhenReadyAtMs: Long = 0L
     private var lastPlayingAtMs: Long = 0L
+
     // Used to distinguish a STATE_BUFFERING caused by a user seek from a real HAL offload
     // reset (where audio underflows mid-playback). Without this, seeking shortly after
     // playback starts re-enters BUFFERING within the HAL-reset window and triggers a full
     // player rebuild, which leaves the MediaSession briefly pointing at the released player
     // and silently drops any subsequent seeks.
     private var lastSeekAtMs: Long = 0L
+
     // Used to distinguish a STATE_BUFFERING caused by a song transition from a real HAL offload reset.
     private var lastMediaItemTransitionAtMs: Long = 0L
+
     // Diagnostics: timestamp when the master player entered STATE_BUFFERING, used to
     // measure buffering->ready (playback prepare) durations for the performance report.
     private var bufferingStartedAtMs: Long = 0L
+
     // Diagnostics: timestamp when the most recent crossfade/transition started.
     private var transitionStartedAtMs: Long = 0L
+
     // Timestamp when the most recent crossfade/transition finished. Used to give the new
     // master a grace window before the HAL-offload-reset heuristic can fire, so a crossfade
     // can never spuriously disable audio offload (battery) or trigger a player rebuild.
@@ -358,6 +384,7 @@ class DualPlayerEngine @Inject constructor(
                 playerB?.playWhenReady = false
                 abandonAudioFocus()
             }
+
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                 Timber.tag("TransitionDebug").d("AudioFocus LOSS_TRANSIENT. Pausing.")
                 val auxiliaryPlayer = playerB
@@ -371,6 +398,7 @@ class DualPlayerEngine @Inject constructor(
                 playerA.playWhenReady = false
                 auxiliaryPlayer?.playWhenReady = false
             }
+
             AudioManager.AUDIOFOCUS_GAIN -> {
                 Timber.tag("TransitionDebug").d("AudioFocus GAIN. Resuming if paused by loss.")
                 if (isFocusLossPause) {
@@ -383,269 +411,369 @@ class DualPlayerEngine @Inject constructor(
     }
 
     // Listener to attach to the active master player (playerA)
-    private val masterPlayerListener = object : Player.Listener, AnalyticsListener, ExoPlayer.AudioOffloadListener {
-        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
-            if (playWhenReady) {
-                lastPlayWhenReadyAtMs = SystemClock.elapsedRealtime()
-                requestAudioFocus()
-                scheduleAudioOffloadFallbackIfNeeded(playerA)
-            } else {
-                cancelAudioOffloadFallback()
-                // Keep focus across user pauses so a quick resume doesn't have to re-acquire it.
-                // Focus is abandoned explicitly on AUDIOFOCUS_LOSS and on release(); anything in
-                // between (user pause/play) keeps the request alive to avoid contention races
-                // that occasionally caused press-play to auto-pause after a short wait.
-            }
-        }
+    private val masterPlayerListener =
+        object : Player.Listener, AnalyticsListener, ExoPlayer.AudioOffloadListener {
 
-        override fun onIsPlayingChanged(isPlaying: Boolean) {
-            if (isPlaying) {
-                lastPlayingAtMs = SystemClock.elapsedRealtime()
-                cancelAudioOffloadFallback()
-            }
-        }
-
-        /**
-         * Fires when ExoPlayer believes the audio HAL is producing output via
-         * offload and the renderer thread can stop polling — at that point the
-         * CPU genuinely doesn't need a wake lock to keep playing audio. When
-         * [sleepingForOffload] flips back to false (track change, format
-         * mismatch, fallback path), restore [C.WAKE_MODE_LOCAL] so the
-         * non-offload PCM path keeps the CPU awake correctly.
-         *
-         * Battery: this is what actually lets the SoC race-to-sleep during
-         * music playback. The static [C.WAKE_MODE_LOCAL] we set at build time
-         * is the safe default; this callback is the dynamic optimisation.
-         */
-        @Suppress("UnsafeOptInUsageError")
-        override fun onSleepingForOffloadChanged(sleepingForOffload: Boolean) {
-            if (!::playerA.isInitialized) return
-            // Only override the wake mode for local media. Remote schemes need
-            // C.WAKE_MODE_NETWORK to keep the wifi lock; we never want to drop
-            // that to NONE.
-            val baseMode = wakeModeFor(playerA.currentMediaItem)
-            val desiredMode = if (sleepingForOffload && baseMode == C.WAKE_MODE_LOCAL) {
-                C.WAKE_MODE_NONE
-            } else {
-                baseMode
-            }
-            if (currentWakeMode == desiredMode) return
-
-            try {
-                playerA.setWakeMode(desiredMode)
-                playerB?.setWakeMode(desiredMode)
-                currentWakeMode = desiredMode
-                Timber.tag("DualPlayerEngine").d(
-                    "Wake mode -> %d (sleepingForOffload=%b)",
-                    desiredMode,
-                    sleepingForOffload
-                )
-            } catch (e: Exception) {
-                Timber.tag("DualPlayerEngine").w(e, "Failed to apply offload-aware wake mode")
-            }
-        }
-
-        override fun onAudioDecoderInitialized(
-            eventTime: AnalyticsListener.EventTime,
-            decoderName: String,
-            initializedTimestampMs: Long,
-            initializationDurationMs: Long
-        ) {
-            val isHardware = AudioDecoderPolicy.isLikelyHardwareDecoder(decoderName)
-            _activeDecoderInfo.value = ActiveDecoderInfo(decoderName, isHardware)
-            PerformanceMetrics.recordTiming(
-                PerformanceMetrics.Timings.AUDIO_DECODER_INIT,
-                initializationDurationMs
-            )
-            AdvancedPerformanceDiagnostics.recordEventIfEnabled(
-                type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
-                name = "audio_decoder_initialized"
-            ) {
-                mapOf(
-                    "decoderName" to decoderName,
-                    "isHardware" to isHardware.toString(),
-                    "initializationDurationMs" to initializationDurationMs.toString()
-                )
-            }
-            Timber.tag("DualPlayerEngine").d("Audio decoder initialized: %s (Hardware: %b)", decoderName, isHardware)
-        }
-
-        override fun onAudioInputFormatChanged(
-            eventTime: AnalyticsListener.EventTime,
-            format: Format,
-            decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?
-        ) {
-            // Record the live format (channels, sample rate, bit depth) as the report's
-            // source of multichannel / bit-depth data — these aren't stored in the library DB.
-            PerformanceMetrics.recordPlaybackFormat(
-                channelCount = if (format.channelCount == Format.NO_VALUE) 0 else format.channelCount,
-                sampleRate = if (format.sampleRate == Format.NO_VALUE) 0 else format.sampleRate,
-                pcmEncoding = if (format.pcmEncoding == Format.NO_VALUE) 0 else format.pcmEncoding
-            )
-            AdvancedPerformanceDiagnostics.recordEventIfEnabled(
-                type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
-                name = "audio_format_changed"
-            ) {
-                mapOf(
-                    "mime" to (format.sampleMimeType ?: "unknown"),
-                    "sampleRate" to format.sampleRate.toString(),
-                    "channels" to format.channelCount.toString(),
-                    "pcmEncoding" to format.pcmEncoding.toString(),
-                    "bitrate" to format.bitrate.toString()
-                )
-            }
-        }
-
-        override fun onAudioSessionIdChanged(audioSessionId: Int) {
-            if (audioSessionId != 0 && _activeAudioSessionId.value != audioSessionId) {
-                _activeAudioSessionId.value = audioSessionId
-                AdvancedPerformanceDiagnostics.recordEventIfEnabled(
-                    type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
-                    name = "audio_session_changed"
-                ) {
-                    mapOf("audioSessionId" to audioSessionId.toString())
-                }
-                Timber.tag("TransitionDebug").d("Master audio session changed: %d", audioSessionId)
-            }
-        }
-
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            lastMediaItemTransitionAtMs = SystemClock.elapsedRealtime()
-            cancelAudioOffloadFallback()
-            AdvancedPerformanceDiagnostics.recordEventIfEnabled(
-                type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
-                name = "media_item_transition",
-                elapsedRealtimeMs = lastMediaItemTransitionAtMs
-            ) {
-                mapOf(
-                    "reason" to reason.toString(),
-                    "scheme" to (mediaItem?.localConfiguration?.uri?.scheme ?: "unknown")
-                )
-            }
-            
-            // If the transition was not automatic (e.g. user skip or playlist change),
-            // immediately cancel any background crossfade logic to ensure responsiveness.
-            if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
-                cancelNext()
-            }
-
-            val uri = mediaItem?.localConfiguration?.uri
-            if (uri?.scheme == "telegram") {
-                scope.launch {
-                    val result = telegramRepository.resolveTelegramUri(uri.toString())
-                    val fileId = result?.first
-                    telegramCacheManager.setActivePlayback(fileId)
-                    Timber.tag("DualPlayerEngine").d("Telegram playback active: fileId=$fileId")
-                }
-            } else {
-                telegramCacheManager.setActivePlayback(null)
-            }
-            applyWakeModeForCurrentItem()
-
-            // --- Pre-Resolve Next/Prev Tracks with Debounce to prevent flooding ---
-            preResolutionJob?.cancel()
-            preResolutionJob = scope.launch {
-                delay(600) // Wait for user to stop skipping/navigating
-                try {
-                    val currentIndex = playerA.currentMediaItemIndex
-                    if (currentIndex != C.INDEX_UNSET) {
-                        // Resolve each neighbour directly — no intermediate list allocation.
-                        if (currentIndex + 1 < playerA.mediaItemCount) {
-                            playerA.getMediaItemAt(currentIndex + 1).localConfiguration?.uri
-                                ?.takeIf { it.scheme in CLOUD_PROXY_SCHEMES }
-                                ?.let { resolveCloudUri(it) }
-                        }
-                        if (currentIndex - 1 >= 0) {
-                            playerA.getMediaItemAt(currentIndex - 1).localConfiguration?.uri
-                                ?.takeIf { it.scheme in CLOUD_PROXY_SCHEMES }
-                                ?.let { resolveCloudUri(it) }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Timber.tag("DualPlayerEngine").w(e, "Pre-resolution error")
-                }
-            }
-        }
-
-        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
-            if (transitionRunning) return
-            if (reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED || queueSnapshot.isEmpty()) {
-                refreshQueueSnapshotFromMaster(windowStartIndex = 0, usesWindowedQueue = false)
-            }
-        }
-
-        override fun onPlaybackStateChanged(playbackState: Int) {
-            when (playbackState) {
-                Player.STATE_BUFFERING -> {
-                    val now = SystemClock.elapsedRealtime()
-                    if (bufferingStartedAtMs == 0L) bufferingStartedAtMs = now
-                    AdvancedPerformanceDiagnostics.recordEventIfEnabled(
-                        type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
-                        name = "playback_buffering",
-                        elapsedRealtimeMs = now
-                    )
-                    val timeSincePlayingMs = now - lastPlayingAtMs
-                    val timeSinceSeekMs = now - lastSeekAtMs
-                    val timeSinceTransitionMs = now - lastTransitionFinishedAtMs
-                    val timeSinceMediaItemTransitionMs = now - lastMediaItemTransitionAtMs
-                    val isPostSeekBuffering = lastSeekAtMs > 0L && timeSinceSeekMs < 1_500L
-                    val isPostTransitionBuffering = lastTransitionFinishedAtMs > 0L &&
-                        timeSinceTransitionMs < POST_TRANSITION_OFFLOAD_GUARD_MS
-                    val isPostMediaItemTransition = lastMediaItemTransitionAtMs > 0L &&
-                        timeSinceMediaItemTransitionMs < 2_000L
-                    if (shouldDisableAudioOffloadOnEarlyBuffering(
-                            audioOffloadEnabled = audioOffloadEnabled,
-                            transitionRunning = transitionRunning,
-                            lastPlayingAtMs = lastPlayingAtMs,
-                            timeSincePlayingMs = timeSincePlayingMs,
-                            isPostSeekBuffering = isPostSeekBuffering,
-                            isPostTransitionBuffering = isPostTransitionBuffering,
-                            isPostMediaItemTransition = isPostMediaItemTransition
-                        )
-                    ) {
-                        disableAudioOffloadForSession(
-                            reason = "HAL offload reset detected: STATE_BUFFERING after ${timeSincePlayingMs}ms of playback"
-                        )
-                    } else {
-                        scheduleAudioOffloadFallbackIfNeeded(playerA)
-                    }
-                }
-                Player.STATE_READY -> {
-                    if (bufferingStartedAtMs > 0L) {
-                        val prepareDurationMs = SystemClock.elapsedRealtime() - bufferingStartedAtMs
-                        PerformanceMetrics.recordTiming(
-                            PerformanceMetrics.Timings.PLAYBACK_PREPARE,
-                            prepareDurationMs
-                        )
-                        AdvancedPerformanceDiagnostics.recordEventIfEnabled(
-                            type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
-                            name = "playback_ready_after_buffering"
-                        ) {
-                            mapOf("prepareDurationMs" to prepareDurationMs.toString())
-                        }
-                        bufferingStartedAtMs = 0L
-                    }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (playWhenReady) {
+                    lastPlayWhenReadyAtMs = SystemClock.elapsedRealtime()
+                    requestAudioFocus()
                     scheduleAudioOffloadFallbackIfNeeded(playerA)
+                } else {
+                    cancelAudioOffloadFallback()
+                    // Keep focus across user pauses so a quick resume doesn't have to re-acquire it.
+                    // Focus is abandoned explicitly on AUDIOFOCUS_LOSS and on release(); anything in
+                    // between (user pause/play) keeps the request alive to avoid contention races
+                    // that occasionally caused press-play to auto-pause after a short wait.
                 }
-                Player.STATE_IDLE, Player.STATE_ENDED -> {
-                    bufferingStartedAtMs = 0L
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) {
+                    lastPlayingAtMs = SystemClock.elapsedRealtime()
                     cancelAudioOffloadFallback()
                 }
             }
-        }
 
-        override fun onPositionDiscontinuity(
-            oldPosition: Player.PositionInfo,
-            newPosition: Player.PositionInfo,
-            reason: Int
-        ) {
-            if (reason == Player.DISCONTINUITY_REASON_SEEK ||
-                reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
+            /**
+             * Fires when ExoPlayer believes the audio HAL is producing output via
+             * offload and the renderer thread can stop polling — at that point the
+             * CPU genuinely doesn't need a wake lock to keep playing audio. When
+             * [sleepingForOffload] flips back to false (track change, format mismatch,
+             * fallback path), restore [C.WAKE_MODE_LOCAL] so the non-offload PCM path
+             * keeps the CPU awake correctly.
+             *
+             * Battery: this is what actually lets the SoC race-to-sleep during
+             * music playback. The static [C.WAKE_MODE_LOCAL] we set at build time is
+             * the safe default; this callback is the dynamic optimisation.
+             */
+            @Suppress("UnsafeOptInUsageError")
+            override fun onSleepingForOffloadChanged(sleepingForOffload: Boolean) {
+                if (!::playerA.isInitialized) return
+
+                // Only override the wake mode for local media. Remote schemes need
+                // C.WAKE_MODE_NETWORK to keep the wifi lock; we never want to drop
+                // that to NONE.
+                val baseMode = wakeModeFor(playerA.currentMediaItem)
+                val desiredMode = if (
+                    sleepingForOffload &&
+                    baseMode == C.WAKE_MODE_LOCAL
+                ) {
+                    C.WAKE_MODE_NONE
+                } else {
+                    baseMode
+                }
+
+                if (currentWakeMode == desiredMode) return
+
+                try {
+                    playerA.setWakeMode(desiredMode)
+                    playerB?.setWakeMode(desiredMode)
+                    currentWakeMode = desiredMode
+
+                    Timber.tag("DualPlayerEngine").d(
+                        "Wake mode -> %d (sleepingForOffload=%b)",
+                        desiredMode,
+                        sleepingForOffload
+                    )
+                } catch (e: Exception) {
+                    Timber.tag("DualPlayerEngine").w(
+                        e,
+                        "Failed to apply offload-aware wake mode"
+                    )
+                }
+            }
+
+            override fun onAudioDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long
             ) {
-                lastSeekAtMs = SystemClock.elapsedRealtime()
+                val isHardware = AudioDecoderPolicy.isLikelyHardwareDecoder(decoderName)
+                _activeDecoderInfo.value = ActiveDecoderInfo(decoderName, isHardware)
+
+                PerformanceMetrics.recordTiming(
+                    PerformanceMetrics.Timings.AUDIO_DECODER_INIT,
+                    initializationDurationMs
+                )
+
+                AdvancedPerformanceDiagnostics.recordEventIfEnabled(
+                    type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
+                    name = "audio_decoder_initialized"
+                ) {
+                    mapOf(
+                        "decoderName" to decoderName,
+                        "isHardware" to isHardware.toString(),
+                        "initializationDurationMs" to initializationDurationMs.toString()
+                    )
+                }
+
+                Timber.tag("DualPlayerEngine").d(
+                    "Audio decoder initialized: %s (Hardware: %b)",
+                    decoderName,
+                    isHardware
+                )
+            }
+
+            override fun onAudioInputFormatChanged(
+                eventTime: AnalyticsListener.EventTime,
+                format: Format,
+                decoderReuseEvaluation: androidx.media3.exoplayer.DecoderReuseEvaluation?
+            ) {
+                // Record the live format (channels, sample rate, bit depth) as the report's
+                // source of multichannel / bit-depth data — these aren't stored in the library DB.
+                PerformanceMetrics.recordPlaybackFormat(
+                    channelCount = if (format.channelCount == Format.NO_VALUE) 0 else format.channelCount,
+                    sampleRate = if (format.sampleRate == Format.NO_VALUE) 0 else format.sampleRate,
+                    pcmEncoding = if (format.pcmEncoding == Format.NO_VALUE) 0 else format.pcmEncoding
+                )
+
+                AdvancedPerformanceDiagnostics.recordEventIfEnabled(
+                    type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
+                    name = "audio_format_changed"
+                ) {
+                    mapOf(
+                        "mime" to (format.sampleMimeType ?: "unknown"),
+                        "sampleRate" to format.sampleRate.toString(),
+                        "channels" to format.channelCount.toString(),
+                        "pcmEncoding" to format.pcmEncoding.toString(),
+                        "bitrate" to format.bitrate.toString()
+                    )
+                }
+            }
+
+            override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                if (audioSessionId != 0 && _activeAudioSessionId.value != audioSessionId) {
+                    _activeAudioSessionId.value = audioSessionId
+
+                    AdvancedPerformanceDiagnostics.recordEventIfEnabled(
+                        type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
+                        name = "audio_session_changed"
+                    ) {
+                        mapOf("audioSessionId" to audioSessionId.toString())
+                    }
+
+                    Timber.tag("TransitionDebug").d(
+                        "Master audio session changed: %d",
+                        audioSessionId
+                    )
+                }
+            }
+
+            override fun onMediaItemTransition(
+                mediaItem: MediaItem?,
+                reason: Int
+            ) {
+                lastMediaItemTransitionAtMs = SystemClock.elapsedRealtime()
+                cancelAudioOffloadFallback()
+
+                AdvancedPerformanceDiagnostics.recordEventIfEnabled(
+                    type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
+                    name = "media_item_transition",
+                    elapsedRealtimeMs = lastMediaItemTransitionAtMs
+                ) {
+                    mapOf(
+                        "reason" to reason.toString(),
+                        "scheme" to (
+                            mediaItem?.localConfiguration?.uri?.scheme ?: "unknown"
+                            )
+                    )
+                }
+
+                // If the transition was not automatic (e.g. user skip or playlist change),
+                // immediately cancel any background crossfade logic to ensure responsiveness.
+                if (reason != Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                    cancelNext()
+                }
+
+                val uri = mediaItem?.localConfiguration?.uri
+
+                if (uri?.scheme == "telegram") {
+                    scope.launch {
+                        val result = telegramRepository.resolveTelegramUri(uri.toString())
+                        val fileId = result?.first
+                        telegramCacheManager.setActivePlayback(fileId)
+
+                        Timber.tag("DualPlayerEngine").d(
+                            "Telegram playback active: fileId=$fileId"
+                        )
+                    }
+                } else {
+                    telegramCacheManager.setActivePlayback(null)
+                }
+
+                applyWakeModeForCurrentItem()
+
+                // --- Pre-Resolve Next/Prev Tracks ---
+                //
+                // YouTube stream extraction can take longer than a normal local/remote URI
+                // lookup. When a YouTube neighbour exists, start immediately instead of waiting
+                // for the normal 600ms skip debounce.
+                preResolutionJob?.cancel()
+                preResolutionJob = scope.launch {
+                    val currentIndex = playerA.currentMediaItemIndex
+
+                    val nextIsYouTube =
+                        currentIndex != C.INDEX_UNSET &&
+                            currentIndex + 1 < playerA.mediaItemCount &&
+                            playerA.getMediaItemAt(currentIndex + 1)
+                                .localConfiguration?.uri?.scheme == "youtube"
+
+                    val previousIsYouTube =
+                        currentIndex != C.INDEX_UNSET &&
+                            currentIndex - 1 >= 0 &&
+                            playerA.getMediaItemAt(currentIndex - 1)
+                                .localConfiguration?.uri?.scheme == "youtube"
+
+                    if (!nextIsYouTube && !previousIsYouTube) {
+                        delay(600)
+                    }
+
+                    try {
+                        if (currentIndex != C.INDEX_UNSET) {
+                            // Resolve each neighbour directly — no intermediate list allocation.
+                            if (currentIndex + 1 < playerA.mediaItemCount) {
+                                playerA.getMediaItemAt(currentIndex + 1)
+                                    .localConfiguration?.uri
+                                    ?.takeIf { it.scheme in CLOUD_PROXY_SCHEMES }
+                                    ?.let { resolveCloudUri(it) }
+                            }
+
+                            if (currentIndex - 1 >= 0) {
+                                playerA.getMediaItemAt(currentIndex - 1)
+                                    .localConfiguration?.uri
+                                    ?.takeIf { it.scheme in CLOUD_PROXY_SCHEMES }
+                                    ?.let { resolveCloudUri(it) }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Timber.tag("DualPlayerEngine").w(
+                            e,
+                            "Pre-resolution error"
+                        )
+                    }
+                }
+            }
+
+            override fun onTimelineChanged(
+                timeline: Timeline,
+                reason: Int
+            ) {
+                if (transitionRunning) return
+
+                if (
+                    reason == Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED ||
+                    queueSnapshot.isEmpty()
+                ) {
+                    refreshQueueSnapshotFromMaster(
+                        windowStartIndex = 0,
+                        usesWindowedQueue = false
+                    )
+                }
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                when (playbackState) {
+                    Player.STATE_BUFFERING -> {
+                        val now = SystemClock.elapsedRealtime()
+
+                        if (bufferingStartedAtMs == 0L) {
+                            bufferingStartedAtMs = now
+                        }
+
+                        AdvancedPerformanceDiagnostics.recordEventIfEnabled(
+                            type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
+                            name = "playback_buffering",
+                            elapsedRealtimeMs = now
+                        )
+
+                        val timeSincePlayingMs = now - lastPlayingAtMs
+                        val timeSinceSeekMs = now - lastSeekAtMs
+                        val timeSinceTransitionMs = now - lastTransitionFinishedAtMs
+                        val timeSinceMediaItemTransitionMs =
+                            now - lastMediaItemTransitionAtMs
+
+                        val isPostSeekBuffering =
+                            lastSeekAtMs > 0L &&
+                                timeSinceSeekMs < 1_500L
+
+                        val isPostTransitionBuffering =
+                            lastTransitionFinishedAtMs > 0L &&
+                                timeSinceTransitionMs < POST_TRANSITION_OFFLOAD_GUARD_MS
+
+                        val isPostMediaItemTransition =
+                            lastMediaItemTransitionAtMs > 0L &&
+                                timeSinceMediaItemTransitionMs < 2_000L
+
+                        if (
+                            shouldDisableAudioOffloadOnEarlyBuffering(
+                                audioOffloadEnabled = audioOffloadEnabled,
+                                transitionRunning = transitionRunning,
+                                lastPlayingAtMs = lastPlayingAtMs,
+                                timeSincePlayingMs = timeSincePlayingMs,
+                                isPostSeekBuffering = isPostSeekBuffering,
+                                isPostTransitionBuffering = isPostTransitionBuffering,
+                                isPostMediaItemTransition = isPostMediaItemTransition
+                            )
+                        ) {
+                            disableAudioOffloadForSession(
+                                reason =
+                                    "HAL offload reset detected: STATE_BUFFERING after " +
+                                        "${timeSincePlayingMs}ms of playback"
+                            )
+                        } else {
+                            scheduleAudioOffloadFallbackIfNeeded(playerA)
+                        }
+                    }
+
+                    Player.STATE_READY -> {
+                        if (bufferingStartedAtMs > 0L) {
+                            val prepareDurationMs =
+                                SystemClock.elapsedRealtime() - bufferingStartedAtMs
+
+                            PerformanceMetrics.recordTiming(
+                                PerformanceMetrics.Timings.PLAYBACK_PREPARE,
+                                prepareDurationMs
+                            )
+
+                            AdvancedPerformanceDiagnostics.recordEventIfEnabled(
+                                type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
+                                name = "playback_ready_after_buffering"
+                            ) {
+                                mapOf(
+                                    "prepareDurationMs" to
+                                        prepareDurationMs.toString()
+                                )
+                            }
+
+                            bufferingStartedAtMs = 0L
+                        }
+
+                        scheduleAudioOffloadFallbackIfNeeded(playerA)
+                    }
+
+                    Player.STATE_IDLE,
+                    Player.STATE_ENDED -> {
+                        bufferingStartedAtMs = 0L
+                        cancelAudioOffloadFallback()
+                    }
+                }
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int
+            ) {
+                if (
+                    reason == Player.DISCONTINUITY_REASON_SEEK ||
+                    reason == Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT
+                ) {
+                    lastSeekAtMs = SystemClock.elapsedRealtime()
+                }
             }
         }
-    }
 
     private fun addMasterPlayerListeners(player: ExoPlayer) {
         player.addListener(masterPlayerListener)
@@ -711,12 +839,22 @@ class DualPlayerEngine @Inject constructor(
 
     fun getCurrentAbsoluteIndex(): Int {
         if (!::playerA.isInitialized) return 0
-        val mediaItem = playerA.currentMediaItem ?: return playerA.currentMediaItemIndex.coerceAtLeast(0)
+
+        val mediaItem = playerA.currentMediaItem
+            ?: return playerA.currentMediaItemIndex.coerceAtLeast(0)
+
         val snapshot = ensureQueueSnapshot()
         val index = resolveCurrentAbsoluteIndex(mediaItem, snapshot)
+
         return if (index == C.INDEX_UNSET) {
             if (activePlayerUsesWindowedQueue) {
-                (activeWindowStartIndex + playerA.currentMediaItemIndex).coerceIn(0, (snapshot.size - 1).coerceAtLeast(0))
+                (
+                    activeWindowStartIndex +
+                        playerA.currentMediaItemIndex
+                    ).coerceIn(
+                        0,
+                        (snapshot.size - 1).coerceAtLeast(0)
+                    )
             } else {
                 playerA.currentMediaItemIndex.coerceAtLeast(0)
             }
@@ -727,37 +865,66 @@ class DualPlayerEngine @Inject constructor(
 
     fun triggerAdjacentPreResolution() {
         if (!::playerA.isInitialized) return
+
         preResolutionJob?.cancel()
+
         val currentIndex = playerA.currentMediaItemIndex
+
         if (currentIndex != C.INDEX_UNSET) {
             val adjacentCloudUris = mutableListOf<Uri>()
+            var containsYouTube = false
+
             if (currentIndex + 1 < playerA.mediaItemCount) {
-                playerA.getMediaItemAt(currentIndex + 1).localConfiguration?.uri?.let { uri ->
-                    if (uri.scheme in REMOTE_MEDIA_SCHEMES) adjacentCloudUris.add(uri)
-                }
+                playerA.getMediaItemAt(currentIndex + 1)
+                    .localConfiguration?.uri
+                    ?.let { uri ->
+                        if (uri.scheme in REMOTE_MEDIA_SCHEMES) {
+                            adjacentCloudUris.add(uri)
+
+                            if (uri.scheme == "youtube") {
+                                containsYouTube = true
+                            }
+                        }
+                    }
             }
+
             if (currentIndex - 1 >= 0) {
-                playerA.getMediaItemAt(currentIndex - 1).localConfiguration?.uri?.let { uri ->
-                    if (uri.scheme in REMOTE_MEDIA_SCHEMES) adjacentCloudUris.add(uri)
-                }
+                playerA.getMediaItemAt(currentIndex - 1)
+                    .localConfiguration?.uri
+                    ?.let { uri ->
+                        if (uri.scheme in REMOTE_MEDIA_SCHEMES) {
+                            adjacentCloudUris.add(uri)
+
+                            if (uri.scheme == "youtube") {
+                                containsYouTube = true
+                            }
+                        }
+                    }
             }
 
             if (adjacentCloudUris.isNotEmpty()) {
                 preResolutionJob = scope.launch {
-                    delay(600) // Wait for user to stop skipping/navigating
+                    if (!containsYouTube) {
+                        delay(600) // Wait for user to stop skipping/navigating
+                    }
+
                     try {
                         for (uriToResolve in adjacentCloudUris) {
                             resolveCloudUri(uriToResolve)
                         }
                     } catch (e: Exception) {
-                        Timber.tag("DualPlayerEngine").w(e, "Error during pre-resolution triggered manually")
+                        Timber.tag("DualPlayerEngine").w(
+                            e,
+                            "Error during pre-resolution triggered manually"
+                        )
                     }
                 }
             }
         }
     }
 
-    fun getAudioSessionId(): Int = if (::playerA.isInitialized) playerA.audioSessionId else 0
+    fun getAudioSessionId(): Int =
+        if (::playerA.isInitialized) playerA.audioSessionId else 0
 
     private var isReleased = false
     private val resolvedUriCache = LruCache<String, Uri>(100)
@@ -766,11 +933,21 @@ class DualPlayerEngine @Inject constructor(
     // prefetch depth so hi-res/lossless buffering (and the second player during a crossfade)
     // can't balloon peak memory on constrained hardware. Cached: it never changes at runtime.
     private val isLowRamDevice: Boolean by lazy {
-        (context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager)?.isLowRamDevice == true
+        (
+            context.getSystemService(Context.ACTIVITY_SERVICE)
+                as? ActivityManager
+            )?.isLowRamDevice == true
     }
 
     fun initialize() {
-        if (!isReleased && ::playerA.isInitialized && playerA.applicationLooper.thread.isAlive) return
+        if (
+            !isReleased &&
+            ::playerA.isInitialized &&
+            playerA.applicationLooper.thread.isAlive
+        ) {
+            return
+        }
+
         if (scope.coroutineContext[Job]?.isActive != true) {
             scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
         }
@@ -778,9 +955,22 @@ class DualPlayerEngine @Inject constructor(
         if (::playerA.isInitialized) {
             removeMasterPlayerListeners(playerA)
             onPlayerAboutToBeReleasedListener?.invoke(playerA)
-            try { playerA.release() } catch (e: Exception) { /* Ignore */ }
+
+            try {
+                playerA.release()
+            } catch (e: Exception) {
+                /* Ignore */
+            }
         }
-        playerB?.let { try { it.release() } catch (e: Exception) { /* Ignore */ } }
+
+        playerB?.let {
+            try {
+                it.release()
+            } catch (e: Exception) {
+                /* Ignore */
+            }
+        }
+
         playerB = null
 
         playerA = buildPlayer()
@@ -789,9 +979,11 @@ class DualPlayerEngine @Inject constructor(
 
         _activeAudioSessionId.value = playerA.audioSessionId
         isReleased = false
+
         queueSnapshot = emptyList()
         activeWindowStartIndex = 0
         activePlayerUsesWindowedQueue = false
+
         resetPreparedWindowState()
     }
 
@@ -814,18 +1006,27 @@ class DualPlayerEngine @Inject constructor(
             .build()
 
         val result = audioManager.requestAudioFocus(request)
+
         when (result) {
             AudioManager.AUDIOFOCUS_REQUEST_GRANTED -> {
                 audioFocusRequest = request
             }
+
             AudioManager.AUDIOFOCUS_REQUEST_DELAYED -> {
                 audioFocusRequest = request
                 isFocusLossPause = true
                 playerA.playWhenReady = false
-                if (transitionRunning) playerB?.playWhenReady = false
+
+                if (transitionRunning) {
+                    playerB?.playWhenReady = false
+                }
             }
+
             else -> {
-                Timber.tag("TransitionDebug").w("AudioFocus Request Failed: $result")
+                Timber.tag("TransitionDebug").w(
+                    "AudioFocus Request Failed: %d",
+                    result
+                )
                 playerA.playWhenReady = false
             }
         }
@@ -840,15 +1041,32 @@ class DualPlayerEngine @Inject constructor(
 
     private fun scheduleAudioOffloadFallbackIfNeeded(player: ExoPlayer) {
         cancelAudioOffloadFallback()
-        if (!audioOffloadEnabled || transitionRunning || !player.playWhenReady || player.isPlaying) return
+
+        if (
+            !audioOffloadEnabled ||
+            transitionRunning ||
+            !player.playWhenReady ||
+            player.isPlaying
+        ) {
+            return
+        }
+
         if (!isLikelyLocalMedia(player.currentMediaItem)) return
 
         val watchedMediaId = player.currentMediaItem?.mediaId ?: return
-        if (player.playbackState == Player.STATE_IDLE || player.playbackState == Player.STATE_ENDED) return
+
+        if (
+            player.playbackState == Player.STATE_IDLE ||
+            player.playbackState == Player.STATE_ENDED
+        ) {
+            return
+        }
+
         bufferingFallbackJob = scope.launch {
             delay(AUDIO_OFFLOAD_STALL_FALLBACK_MS)
 
             val currentMediaId = player.currentMediaItem?.mediaId
+
             val shouldFallback = shouldTriggerAudioOffloadStallFallback(
                 audioOffloadEnabled = audioOffloadEnabled,
                 transitionRunning = transitionRunning,
@@ -859,11 +1077,14 @@ class DualPlayerEngine @Inject constructor(
                 playWhenReady = player.playWhenReady,
                 playbackSuppressionReason = player.playbackSuppressionReason
             )
+
             if (!shouldFallback) return@launch
 
             disableAudioOffloadForSession(
-                reason = "Local media did not produce audio for " +
-                    "${AUDIO_OFFLOAD_STALL_FALLBACK_MS}ms (state=${player.playbackState})"
+                reason =
+                    "Local media did not produce audio for " +
+                        "${AUDIO_OFFLOAD_STALL_FALLBACK_MS}ms " +
+                        "(state=${player.playbackState})"
             )
         }
     }
@@ -880,7 +1101,11 @@ class DualPlayerEngine @Inject constructor(
 
     private fun wakeModeFor(mediaItem: MediaItem?): Int {
         val scheme = mediaItem?.localConfiguration?.uri?.scheme?.lowercase()
-        return if (scheme != null && scheme in REMOTE_MEDIA_SCHEMES) {
+
+        return if (
+            scheme != null &&
+            scheme in REMOTE_MEDIA_SCHEMES
+        ) {
             C.WAKE_MODE_NETWORK
         } else {
             C.WAKE_MODE_LOCAL
@@ -891,16 +1116,25 @@ class DualPlayerEngine @Inject constructor(
 
     private fun applyWakeModeForCurrentItem() {
         if (!::playerA.isInitialized) return
+
         val mode = wakeModeFor(playerA.currentMediaItem)
+
         if (currentWakeMode == mode) return
-        
+
         try {
             playerA.setWakeMode(mode)
             playerB?.setWakeMode(mode)
             currentWakeMode = mode
-            Timber.tag("DualPlayerEngine").d("Wake mode updated to %d", mode)
+
+            Timber.tag("DualPlayerEngine").d(
+                "Wake mode updated to %d",
+                mode
+            )
         } catch (e: Exception) {
-            Timber.tag("DualPlayerEngine").w(e, "Failed to update wake mode")
+            Timber.tag("DualPlayerEngine").w(
+                e,
+                "Failed to update wake mode"
+            )
         }
     }
 
@@ -916,13 +1150,22 @@ class DualPlayerEngine @Inject constructor(
 
     private fun disableAudioOffloadForSession(reason: String) {
         if (!audioOffloadEnabled) return
+
         if (transitionRunning) {
-            Timber.tag("DualPlayerEngine").w("Skipping offload fallback during active transition. %s", reason)
+            Timber.tag("DualPlayerEngine").w(
+                "Skipping offload fallback during active transition. %s",
+                reason
+            )
             return
         }
 
         audioOffloadEnabled = false
-        PerformanceMetrics.recordOffloadFallback(reason, SystemClock.elapsedRealtime())
+
+        PerformanceMetrics.recordOffloadFallback(
+            reason,
+            SystemClock.elapsedRealtime()
+        )
+
         rebuildPlayersPreservingMasterState(
             logMessage = "Audio offload disabled for current session. $reason"
         )
@@ -930,6 +1173,7 @@ class DualPlayerEngine @Inject constructor(
 
     private fun rebuildPlayersPreservingMasterState(logMessage: String) {
         cancelAudioOffloadFallback()
+
         AdvancedPerformanceDiagnostics.recordEventIfEnabled(
             type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
             name = "player_rebuild_start"
@@ -938,15 +1182,27 @@ class DualPlayerEngine @Inject constructor(
         }
 
         val desiredPlayWhenReady = playerA.playWhenReady
+
         // Guard against snapshotting a position that landed during a bad early-startup seek
         // (e.g. an offload stall rebuild firing while the player is at a spurious offset).
         // Positions under 5s on first playback are more likely noise than intent.
-        val positionMs = if (playerA.currentPosition > 5_000L) playerA.currentPosition else 0L
+        val positionMs =
+            if (playerA.currentPosition > 5_000L) {
+                playerA.currentPosition
+            } else {
+                0L
+            }
+
         val currentIndex = playerA.currentMediaItemIndex.coerceAtLeast(0)
+
         // Pre-sized ArrayList avoids the IntRange object and the extra copy produced by .map.
         val mediaItemCount = playerA.mediaItemCount
         val mediaItems = ArrayList<MediaItem>(mediaItemCount)
-        for (i in 0 until mediaItemCount) mediaItems.add(playerA.getMediaItemAt(i))
+
+        for (i in 0 until mediaItemCount) {
+            mediaItems.add(playerA.getMediaItemAt(i))
+        }
+
         val repeatMode = playerA.repeatMode
         val shuffleMode = playerA.shuffleModeEnabled
         val volume = playerA.volume
@@ -955,6 +1211,7 @@ class DualPlayerEngine @Inject constructor(
 
         removeMasterPlayerListeners(playerA)
         onPlayerAboutToBeReleasedListener?.invoke(playerA)
+
         playerA.release()
         playerB?.release()
         playerB = null
@@ -962,122 +1219,93 @@ class DualPlayerEngine @Inject constructor(
         playerA = buildPlayer()
 
         addMasterPlayerListeners(playerA)
+
         playerA.volume = volume
         playerA.pauseAtEndOfMediaItems = pauseAtEnd
         playerA.playbackParameters = playbackParameters
 
         if (mediaItems.isNotEmpty()) {
-            playerA.setMediaItems(mediaItems, currentIndex, positionMs)
+            playerA.setMediaItems(
+                mediaItems,
+                currentIndex,
+                positionMs
+            )
+
             playerA.repeatMode = repeatMode
             playerA.shuffleModeEnabled = shuffleMode
             playerA.prepare()
             playerA.playWhenReady = desiredPlayWhenReady
+
             applyWakeModeForCurrentItem()
         }
 
         _activeAudioSessionId.value = playerA.audioSessionId
-        onPlayerSwappedListeners.forEach { it(playerA) }
+
+        onPlayerSwappedListeners.forEach {
+            it(playerA)
+        }
 
         AdvancedPerformanceDiagnostics.recordEventIfEnabled(
             type = AdvancedPerformanceDiagnostics.EventTypes.PLAYBACK,
             name = "player_rebuild_end"
         ) {
-            mapOf("audioSessionId" to playerA.audioSessionId.toString())
+            mapOf(
+                "audioSessionId" to
+                    playerA.audioSessionId.toString()
+            )
         }
+
         Timber.tag("DualPlayerEngine").d(logMessage)
     }
 
     /**
      * Returns a [DefaultLoadControl] tuned to the device's RAM tier.
-     *
      * Low-RAM devices ([ActivityManager.isLowRamDevice]) receive halved buffer ceilings
      * to prevent memory pressure when both players co-exist during a crossfade.
-     * [bufferForPlaybackMs] is set to ExoPlayer's documented default of 2 500 ms on both
-     * tiers — the previous value of 5 000 ms doubled first-audio latency with no benefit.
      */
     private fun buildAdaptiveLoadControl(): DefaultLoadControl {
-        val isLowRam = (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager)
-            .isLowRamDevice
+        val isLowRam =
+            (
+                context.getSystemService(Context.ACTIVITY_SERVICE)
+                    as ActivityManager
+                ).isLowRamDevice
+
         // setPrioritizeTimeOverSizeThresholds(true): instructs ExoPlayer to use buffered
-        // *duration* (not buffered *bytes*) as the criterion for deciding when to start
-        // playback and when to stop buffering. This is required for correct behaviour with
-        // high-bitrate and lossless formats (FLAC, hi-res ALAC, WAV) where a short byte
-        // window would be exhausted almost immediately, causing repeated rebuffering.
-        // Without this flag ExoPlayer falls back to a default byte threshold that was
-        // designed for typical compressed audio (~128–320 kbps) and will underperform on
-        // files with bitrates above ~1 Mbps.
-        return if (isLowRam) {
-            DefaultLoadControl.Builder()
-                .setBufferDurationsMs(
-                    /* minBufferMs                      */ 15_000,
-                    /* maxBufferMs                      */ 30_000,
-                    /* bufferForPlaybackMs              */  2_500,
-                    /* bufferForPlaybackAfterRebufferMs */  5_000
-                )
-                .setPrioritizeTimeOverSizeThresholds(true)
-                .build()
-        } else {
-            DefaultLoadControl.Builder()
-                .setBufferDurationsMs(
-                    /* minBufferMs                      */ 30_000,
-                    /* maxBufferMs                      */ 60_000,
-                    /* bufferForPlaybackMs              */  2_500,
-                    /* bufferForPlaybackAfterRebufferMs */  5_000
-                )
-                .setPrioritizeTimeOverSizeThresholds(true)
-                .build()
-        }
+        // duration rather than the default byte threshold as the primary buffer constraint.
+        val profile = loadControlBufferProfileFor(isLowRam)
+
+        return DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                profile.minBufferMs,
+                profile.maxBufferMs,
+                profile.bufferForPlaybackMs,
+                profile.bufferForPlaybackAfterRebufferMs
+            )
+            .setPrioritizeTimeOverSizeThresholds(true)
+            .build()
     }
 
     private fun buildPlayer(): ExoPlayer {
-        val mediaCodecSelector = MediaCodecSelector { mimeType, requiresSecureDecoder, requiresTunnelingDecoder ->
-            val decoderInfos = MediaCodecSelector.DEFAULT.getDecoderInfos(
-                mimeType,
-                requiresSecureDecoder,
-                requiresTunnelingDecoder
-            )
-
-            AudioDecoderPolicy.selectPlatformDecoders(mimeType, decoderInfos)
-        }
         val renderersFactory = object : DefaultRenderersFactory(context) {
-            override fun buildAudioSink(
-                context: Context,
-                enableFloatOutput: Boolean,
-                enableAudioOutputPlaybackParams: Boolean
-            ): AudioSink {
-                return DefaultAudioSink.Builder(context)
-                    .setEnableFloatOutput(hiFiModeEnabled)
-                    .setEnableAudioOutputPlaybackParameters(enableAudioOutputPlaybackParams)
-                    .setAudioProcessorChain(
-                        DefaultAudioSink.DefaultAudioProcessorChain(
-                            HiResSampleRateCapAudioProcessor(),
-                            SurroundDownmixProcessor()
-                        )
-                    )
-                    .build()
-            }
 
-            override fun buildVideoRenderers(
+            override fun buildAudioRenderers(
                 context: Context,
                 extensionRendererMode: Int,
                 mediaCodecSelector: MediaCodecSelector,
-                enableDecoderFallback: Boolean,
+                audioSink: AudioSink,
                 eventHandler: android.os.Handler,
-                eventListener: androidx.media3.exoplayer.video.VideoRendererEventListener,
-                allowedVideoJoiningTimeMs: Long,
+                eventListener: AudioRendererEventListener,
                 out: ArrayList<Renderer>
             ) {
-                // Audio-only player: skip video renderers to save memory and "renderers" count.
-            }
-
-            override fun buildTextRenderers(
-                context: Context,
-                eventListener: androidx.media3.exoplayer.text.TextOutput,
-                outputLooper: android.os.Looper,
-                extensionRendererMode: Int,
-                out: ArrayList<Renderer>
-            ) {
-                // Audio-only player: skip text renderers.
+                super.buildAudioRenderers(
+                    context,
+                    extensionRendererMode,
+                    mediaCodecSelector,
+                    audioSink,
+                    eventHandler,
+                    eventListener,
+                    out
+                )
             }
 
             override fun buildCameraMotionRenderers(
@@ -1087,34 +1315,51 @@ class DualPlayerEngine @Inject constructor(
             ) {
                 // Audio-only player: skip camera motion renderers.
             }
-        }.setEnableAudioFloatOutput(hiFiModeEnabled)
-         .setMediaCodecSelector(mediaCodecSelector)
-         .setEnableDecoderFallback(true)
-         .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+        }
+            .setEnableAudioFloatOutput(hiFiModeEnabled)
+            .setMediaCodecSelector(mediaCodecSelector)
+            .setEnableDecoderFallback(true)
+            .setExtensionRendererMode(
+                DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+            )
 
         val audioAttributes = Media3AudioAttributes.Builder()
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .setUsage(C.USAGE_MEDIA)
             .build()
-            
+
         val resolver = object : ResolvingDataSource.Resolver {
             override fun resolveDataSpec(dataSpec: DataSpec): DataSpec {
                 val uri = dataSpec.uri
                 val scheme = uri.scheme
+
                 if (scheme in CLOUD_PROXY_SCHEMES) {
                     val originalUri = uri.toString()
                     val resolved = resolvedUriCache.get(originalUri)
+
                     if (resolved != null) {
-                        return dataSpec.buildUpon().setUri(resolved).build()
+                        return dataSpec.buildUpon()
+                            .setUri(resolved)
+                            .build()
                     }
-                    Timber.tag("DualPlayerEngine").d("resolveDataSpec: Cache MISS for %s — using original URI", scheme)
+
+                    Timber.tag("DualPlayerEngine").d(
+                        "resolveDataSpec: Cache MISS for %s — using original URI",
+                        scheme
+                    )
                 }
+
                 return dataSpec
             }
         }
-        
+
         val dataSourceFactory = DefaultDataSource.Factory(context)
-        val resolvingFactory = ResolvingDataSource.Factory(dataSourceFactory, resolver)
+        val resolvingFactory =
+            ResolvingDataSource.Factory(
+                dataSourceFactory,
+                resolver
+            )
+
         val extractorsFactory = DefaultExtractorsFactory()
             // FLAG_WORKAROUND_IGNORE_EDIT_LISTS intentionally removed: it breaks Opus files
             // by discarding the edit list that encodes the pre-skip (encoder delay), causing
@@ -1122,36 +1367,61 @@ class DualPlayerEngine @Inject constructor(
             // FLAG_ENABLE_CONSTANT_BITRATE_SEEKING (not _ALWAYS): fallback-only CBR seeking
             // so VBR MP3s with proper Xing/VBRI headers still use their seek table and land
             // on the exact frame instead of jumping ±30 s on a VBR file.
-            .setMp3ExtractorFlags(Mp3Extractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING)
-            .setFlacExtractorFlags(FlacExtractor.FLAG_DISABLE_ID3_METADATA)
+            .setMp3ExtractorFlags(
+                Mp3Extractor.FLAG_ENABLE_CONSTANT_BITRATE_SEEKING
+            )
+            .setFlacExtractorFlags(
+                FlacExtractor.FLAG_DISABLE_ID3_METADATA
+            )
 
         val loadControl = buildAdaptiveLoadControl()
 
-        return ExoPlayer.Builder(context, renderersFactory)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(resolvingFactory, extractorsFactory))
-            .setLoadControl(loadControl)
-            .build().apply {
-            setAudioAttributes(audioAttributes, false)
-            val offloadPreferences = TrackSelectionParameters.AudioOffloadPreferences.Builder()
-                .setAudioOffloadMode(
-                    if (audioOffloadEnabled) {
-                        TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
-                    } else {
-                        TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED
-                    }
+        return ExoPlayer.Builder(
+            context,
+            renderersFactory
+        )
+            .setMediaSourceFactory(
+                DefaultMediaSourceFactory(
+                    resolvingFactory,
+                    extractorsFactory
                 )
-                .build()
-            trackSelectionParameters = trackSelectionParameters.buildUpon()
-                .setAudioOffloadPreferences(offloadPreferences)
-                .build()
-            setHandleAudioBecomingNoisy(true)
-            setWakeMode(C.WAKE_MODE_LOCAL)
-            playWhenReady = false
-        }
+            )
+            .setLoadControl(loadControl)
+            .build()
+            .apply {
+                setAudioAttributes(audioAttributes, false)
+
+                val offloadPreferences =
+                    TrackSelectionParameters.AudioOffloadPreferences.Builder()
+                        .setAudioOffloadMode(
+                            if (audioOffloadEnabled) {
+                                TrackSelectionParameters
+                                    .AudioOffloadPreferences
+                                    .AUDIO_OFFLOAD_MODE_ENABLED
+                            } else {
+                                TrackSelectionParameters
+                                    .AudioOffloadPreferences
+                                    .AUDIO_OFFLOAD_MODE_DISABLED
+                            }
+                        )
+                        .build()
+
+                trackSelectionParameters =
+                    trackSelectionParameters.buildUpon()
+                        .setAudioOffloadPreferences(
+                            offloadPreferences
+                        )
+                        .build()
+
+                setHandleAudioBecomingNoisy(true)
+                setWakeMode(C.WAKE_MODE_LOCAL)
+                playWhenReady = false
+            }
     }
 
     private fun getOrCreateAuxiliaryPlayer(): ExoPlayer {
         playerB?.let { return it }
+
         return buildPlayer().also { player ->
             player.setWakeMode(currentWakeMode)
             playerB = player
@@ -1164,11 +1434,20 @@ class DualPlayerEngine @Inject constructor(
         }
     }
 
-    fun getNextTransitionTarget(currentMediaItem: MediaItem, repeatMode: Int): TransitionTarget? {
+    fun getNextTransitionTarget(
+        currentMediaItem: MediaItem,
+        repeatMode: Int
+    ): TransitionTarget? {
         val snapshot = ensureQueueSnapshot()
+
         if (snapshot.isEmpty()) return null
 
-        val currentAbsoluteIndex = resolveCurrentAbsoluteIndex(currentMediaItem, snapshot)
+        val currentAbsoluteIndex =
+            resolveCurrentAbsoluteIndex(
+                currentMediaItem,
+                snapshot
+            )
+
         if (currentAbsoluteIndex == C.INDEX_UNSET) return null
 
         val targetIndex = when (repeatMode) {
@@ -1176,7 +1455,9 @@ class DualPlayerEngine @Inject constructor(
             else -> currentAbsoluteIndex + 1
         }
 
-        val targetItem = snapshot.getOrNull(targetIndex) ?: return null
+        val targetItem =
+            snapshot.getOrNull(targetIndex) ?: return null
+
         return TransitionTarget(
             mediaItem = targetItem,
             absoluteIndex = targetIndex,
@@ -1186,37 +1467,71 @@ class DualPlayerEngine @Inject constructor(
 
     fun setHiFiMode(enabled: Boolean) {
         if (hiFiModeEnabled == enabled) return
+
         if (enabled && !HiFiCapabilityChecker.isSupported()) {
-            Timber.tag("DualPlayerEngine").w("Hi-Fi mode requested but device does not support PCM_FLOAT")
+            Timber.tag("DualPlayerEngine").w(
+                "Hi-Fi mode requested but device does not support PCM_FLOAT"
+            )
             return
         }
+
         hiFiModeEnabled = enabled
-        rebuildPlayersPreservingMasterState("Hi-Fi mode set to $enabled")
+
+        rebuildPlayersPreservingMasterState(
+            "Hi-Fi mode set to $enabled"
+        )
     }
 
-    suspend fun resolveCloudUri(uri: Uri): Uri = withContext(Dispatchers.IO) {
-        val uriString = uri.toString()
-        resolvedUriCache.get(uriString)?.let { return@withContext it }
+    suspend fun resolveCloudUri(uri: Uri): Uri =
+        withContext(Dispatchers.IO) {
+            val uriString = uri.toString()
 
-        val resolved: Uri? = when (uri.scheme) {
-            "telegram" -> resolveTelegramUriAsync(uri, uriString)
-            "netease" -> resolveNeteaseUriAsync(uriString)
-            "qqmusic" -> resolveQqMusicUriAsync(uriString)
-            "navidrome" -> resolveNavidromeUriAsync(uriString)
-            "jellyfin" -> resolveJellyfinUriAsync(uriString)
-            "gdrive" -> resolveGDriveUriAsync(uriString)
-            else -> null
+            resolvedUriCache.get(uriString)?.let {
+                return@withContext it
+            }
+
+            val resolved: Uri? = when (uri.scheme) {
+                "telegram" ->
+                    resolveTelegramUriAsync(
+                        uri,
+                        uriString
+                    )
+
+                "netease" ->
+                    resolveNeteaseUriAsync(uriString)
+
+                "qqmusic" ->
+                    resolveQqMusicUriAsync(uriString)
+
+                "navidrome" ->
+                    resolveNavidromeUriAsync(uriString)
+
+                "jellyfin" ->
+                    resolveJellyfinUriAsync(uriString)
+
+                "gdrive" ->
+                    resolveGDriveUriAsync(uriString)
+
+                "youtube" ->
+                    resolveYouTubeUriAsync(uriString)
+
+                else -> null
+            }
+
+            if (resolved != null) {
+                resolvedUriCache.put(uriString, resolved)
+                return@withContext resolved
+            }
+
+            uri
         }
 
-        if (resolved != null) {
-            resolvedUriCache.put(uriString, resolved)
-            return@withContext resolved
-        }
-        uri
-    }
-
-    private suspend fun resolveTelegramUriAsync(uri: Uri, uriString: String): Uri? = withContext(Dispatchers.IO) {
+    private suspend fun resolveTelegramUriAsync(
+        uri: Uri,
+        uriString: String
+    ): Uri? = withContext(Dispatchers.IO) {
         val pathSegments = uri.pathSegments
+
         val fileId = if (pathSegments.isNotEmpty()) {
             telegramRepository.resolveTelegramUri(uriString)?.first
         } else {
@@ -1224,8 +1539,14 @@ class DualPlayerEngine @Inject constructor(
         } ?: return@withContext null
 
         val fileInfo = telegramRepository.getFile(fileId)
-        if (fileInfo?.local?.isDownloadingCompleted == true && fileInfo.local.path.isNotEmpty()) {
-            return@withContext Uri.fromFile(File(fileInfo.local.path))
+
+        if (
+            fileInfo?.local?.isDownloadingCompleted == true &&
+            fileInfo.local.path.isNotEmpty()
+        ) {
+            return@withContext Uri.fromFile(
+                File(fileInfo.local.path)
+            )
         }
 
         if (!connectivityStateHolder.isOnline.value) {
@@ -1233,96 +1554,264 @@ class DualPlayerEngine @Inject constructor(
             return@withContext null
         }
 
-        if (!telegramStreamProxy.ensureReady(5_000L)) return@withContext null
-        val proxyUrl = telegramStreamProxy.getProxyUrl(fileId, 0L)
-        if (proxyUrl.isNotEmpty()) Uri.parse(proxyUrl) else null
+        if (!telegramStreamProxy.ensureReady(5_000L)) {
+            return@withContext null
+        }
+
+        val proxyUrl =
+            telegramStreamProxy.getProxyUrl(fileId, 0L)
+
+        if (proxyUrl.isNotEmpty()) {
+            Uri.parse(proxyUrl)
+        } else {
+            null
+        }
     }
 
-    private suspend fun resolveNeteaseUriAsync(uriString: String): Uri? = withContext(Dispatchers.IO) {
-        if (!neteaseStreamProxy.ensureReady(5_000L)) return@withContext null
-        neteaseStreamProxy.resolveNeteaseUri(uriString)?.let { Uri.parse(it) }
+    private suspend fun resolveNeteaseUriAsync(
+        uriString: String
+    ): Uri? = withContext(Dispatchers.IO) {
+        if (!neteaseStreamProxy.ensureReady(5_000L)) {
+            return@withContext null
+        }
+
+        neteaseStreamProxy
+            .resolveNeteaseUri(uriString)
+            ?.let { Uri.parse(it) }
     }
 
-    private suspend fun resolveQqMusicUriAsync(uriString: String): Uri? = withContext(Dispatchers.IO) {
-        if (!qqMusicStreamProxy.ensureReady(5_000L)) return@withContext null
+    private suspend fun resolveQqMusicUriAsync(
+        uriString: String
+    ): Uri? = withContext(Dispatchers.IO) {
+        if (!qqMusicStreamProxy.ensureReady(5_000L)) {
+            return@withContext null
+        }
+
         qqMusicStreamProxy.warmUpStreamUrl(uriString)
-        qqMusicStreamProxy.resolveQqMusicUri(uriString)?.let { Uri.parse(it) }
+
+        qqMusicStreamProxy
+            .resolveQqMusicUri(uriString)
+            ?.let { Uri.parse(it) }
     }
 
-    private suspend fun resolveNavidromeUriAsync(uriString: String): Uri? = withContext(Dispatchers.IO) {
-        if (!navidromeStreamProxy.ensureReady(5_000L)) return@withContext null
+    private suspend fun resolveNavidromeUriAsync(
+        uriString: String
+    ): Uri? = withContext(Dispatchers.IO) {
+        if (!navidromeStreamProxy.ensureReady(5_000L)) {
+            return@withContext null
+        }
+
         navidromeStreamProxy.warmUpStreamUrl(uriString)
-        navidromeStreamProxy.resolveNavidromeUri(uriString)?.toUri()
+
+        navidromeStreamProxy
+            .resolveNavidromeUri(uriString)
+            ?.toUri()
     }
 
-    private suspend fun resolveJellyfinUriAsync(uriString: String): Uri? = withContext(Dispatchers.IO) {
-        if (!jellyfinStreamProxy.ensureReady(5_000L)) return@withContext null
+    private suspend fun resolveJellyfinUriAsync(
+        uriString: String
+    ): Uri? = withContext(Dispatchers.IO) {
+        if (!jellyfinStreamProxy.ensureReady(5_000L)) {
+            return@withContext null
+        }
+
         jellyfinStreamProxy.warmUpStreamUrl(uriString)
-        jellyfinStreamProxy.resolveJellyfinUri(uriString)?.toUri()
+
+        jellyfinStreamProxy
+            .resolveJellyfinUri(uriString)
+            ?.toUri()
     }
 
-    private suspend fun resolveGDriveUriAsync(uriString: String): Uri? = withContext(Dispatchers.IO) {
+    private suspend fun resolveGDriveUriAsync(
+        uriString: String
+    ): Uri? = withContext(Dispatchers.IO) {
         if (!connectivityStateHolder.isOnline.value) {
             connectivityStateHolder.triggerOfflineBlockedEvent()
             return@withContext null
         }
-        if (!gdriveStreamProxy.ensureReady(5_000L)) return@withContext null
-        gdriveStreamProxy.resolveGDriveUri(uriString)?.toUri()
+
+        if (!gdriveStreamProxy.ensureReady(5_000L)) {
+            return@withContext null
+        }
+
+        gdriveStreamProxy
+            .resolveGDriveUri(uriString)
+            ?.toUri()
     }
 
-    suspend fun resolveMediaItem(mediaItem: MediaItem): MediaItem {
-        val uri = mediaItem.localConfiguration?.uri ?: return mediaItem
+    private suspend fun resolveYouTubeUriAsync(
+        uriString: String
+    ): Uri? = withContext(Dispatchers.IO) {
+        val videoId =
+            uriString
+                .removePrefix("youtube://")
+                .trim()
+
+        if (videoId.isBlank()) {
+            Timber.tag("DualPlayerEngine").w(
+                "Invalid YouTube URI: %s",
+                uriString
+            )
+            return@withContext null
+        }
+
+        runCatching {
+            youTubeExtractorService.getStreamUrl(videoId)
+        }.onFailure { error ->
+            Timber.tag("DualPlayerEngine").w(
+                error,
+                "Failed to resolve YouTube videoId=%s",
+                videoId
+            )
+        }.getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { streamUrl ->
+                Uri.parse(streamUrl)
+            }
+    }
+
+    suspend fun resolveMediaItem(
+        mediaItem: MediaItem
+    ): MediaItem {
+        val uri =
+            mediaItem.localConfiguration?.uri
+                ?: return mediaItem
+
         val scheme = uri.scheme
+
         // Use CLOUD_PROXY_SCHEMES: http/https resolve directly via ExoPlayer and never
         // reach resolveCloudUri, so checking them wastes an IO dispatch.
-        if (scheme !in CLOUD_PROXY_SCHEMES) return mediaItem
+        if (scheme !in CLOUD_PROXY_SCHEMES) {
+            return mediaItem
+        }
+
         val resolvedUri = resolveCloudUri(uri)
-        return if (resolvedUri == uri) mediaItem else mediaItem.buildUpon().setUri(resolvedUri).build()
+
+        return if (resolvedUri == uri) {
+            mediaItem
+        } else {
+            mediaItem
+                .buildUpon()
+                .setUri(resolvedUri)
+                .build()
+        }
     }
 
-    suspend fun prepareNext(target: TransitionTarget, startPositionMs: Long = 0L) {
-        prepareNext(target.mediaItem, target.absoluteIndex, startPositionMs)
-    }
-
-    suspend fun prepareNext(mediaItem: MediaItem, startPositionMs: Long = 0L) {
-        val preferredIndex = findMediaItemIndex(
-            items = ensureQueueSnapshot(),
-            mediaId = mediaItem.mediaId,
-            preferAfterExclusive = resolveCurrentAbsoluteIndex(playerA.currentMediaItem ?: mediaItem, queueSnapshot)
+    suspend fun prepareNext(
+        target: TransitionTarget,
+        startPositionMs: Long = 0L
+    ) {
+        prepareNext(
+            target.mediaItem,
+            target.absoluteIndex,
+            startPositionMs
         )
-        prepareNext(mediaItem, preferredIndex, startPositionMs)
     }
 
-    private suspend fun prepareNext(mediaItem: MediaItem, preferredAbsoluteIndex: Int, startPositionMs: Long = 0L) {
+    suspend fun prepareNext(
+        mediaItem: MediaItem,
+        startPositionMs: Long = 0L
+    ) {
+        val preferredIndex =
+            findMediaItemIndex(
+                items = ensureQueueSnapshot(),
+                mediaId = mediaItem.mediaId,
+                preferAfterExclusive =
+                    resolveCurrentAbsoluteIndex(
+                        playerA.currentMediaItem ?: mediaItem,
+                        queueSnapshot
+                    )
+            )
+
+        prepareNext(
+            mediaItem,
+            preferredIndex,
+            startPositionMs
+        )
+    }
+
+    private suspend fun prepareNext(
+        mediaItem: MediaItem,
+        preferredAbsoluteIndex: Int,
+        startPositionMs: Long = 0L
+    ) {
         try {
             val snapshot = ensureQueueSnapshot()
-            val currentAbsoluteIndex = resolveCurrentAbsoluteIndex(playerA.currentMediaItem ?: mediaItem, snapshot)
+
+            val currentAbsoluteIndex =
+                resolveCurrentAbsoluteIndex(
+                    playerA.currentMediaItem ?: mediaItem,
+                    snapshot
+                )
+
             val targetIndex = when {
                 preferredAbsoluteIndex in snapshot.indices &&
-                    snapshot[preferredAbsoluteIndex].mediaId == mediaItem.mediaId -> preferredAbsoluteIndex
-                else -> findMediaItemIndex(snapshot, mediaItem.mediaId, currentAbsoluteIndex)
+                    snapshot[preferredAbsoluteIndex].mediaId ==
+                    mediaItem.mediaId -> {
+                    preferredAbsoluteIndex
+                }
+
+                else -> {
+                    findMediaItemIndex(
+                        snapshot,
+                        mediaItem.mediaId,
+                        currentAbsoluteIndex
+                    )
+                }
             }
-            val resolvedItem = resolveMediaItem(mediaItem)
-            val auxiliaryPlayer = getOrCreateAuxiliaryPlayer()
+
+            val resolvedItem =
+                resolveMediaItem(mediaItem)
+
+            val auxiliaryPlayer =
+                getOrCreateAuxiliaryPlayer()
 
             auxiliaryPlayer.stop()
             auxiliaryPlayer.clearMediaItems()
 
-            if (targetIndex != C.INDEX_UNSET && snapshot.isNotEmpty()) {
+            if (
+                targetIndex != C.INDEX_UNSET &&
+                snapshot.isNotEmpty()
+            ) {
                 val count = snapshot.size
-                val (start, end) = auxiliaryWindowBounds(targetIndex, count)
-                val windowItems = ArrayList<MediaItem>(end - start)
+                val (start, end) =
+                    auxiliaryWindowBounds(
+                        targetIndex,
+                        count
+                    )
+
+                val windowItems =
+                    ArrayList<MediaItem>(end - start)
+
                 for (i in start until end) {
                     val item = snapshot[i]
-                    windowItems.add(if (i == targetIndex) resolvedItem else item)
+
+                    windowItems.add(
+                        if (i == targetIndex) {
+                            resolvedItem
+                        } else {
+                            item
+                        }
+                    )
                 }
+
                 preparedWindowStartIndex = start
-                preparedPlayerUsesWindowedQueue = count > MAX_AUXILIARY_TIMELINE_ITEMS
-                auxiliaryPlayer.setMediaItems(windowItems, targetIndex - start, startPositionMs)
+                preparedPlayerUsesWindowedQueue =
+                    count > MAX_AUXILIARY_TIMELINE_ITEMS
+
+                auxiliaryPlayer.setMediaItems(
+                    windowItems,
+                    targetIndex - start,
+                    startPositionMs
+                )
             } else {
                 // Fallback for single item if not found in current timeline
                 resetPreparedWindowState()
-                auxiliaryPlayer.setMediaItem(resolvedItem)
+
+                auxiliaryPlayer.setMediaItem(
+                    resolvedItem
+                )
+
                 auxiliaryPlayer.seekTo(startPositionMs)
             }
 
@@ -1331,151 +1820,61 @@ class DualPlayerEngine @Inject constructor(
             auxiliaryPlayer.pause()
         } catch (e: Exception) {
             resetPreparedWindowState()
-            Timber.tag("TransitionDebug").e(e, "Failed to prepare next player")
+
+            Timber.tag("TransitionDebug").e(
+                e,
+                "Failed to prepare next player"
+            )
         }
     }
 
-    fun cancelNext() {
-        val shouldPublishMasterPlayer = transitionRunning
+    private fun cancelNext() {
         transitionJob?.cancel()
-        transitionRunning = false
-        resetPreparedWindowState()
-        playerB?.takeIf { it.mediaItemCount > 0 }?.let { auxiliaryPlayer ->
+        transitionJob = null
+        playerB?.let {
             try {
-                auxiliaryPlayer.stop()
-                auxiliaryPlayer.clearMediaItems()
-            } catch (e: Exception) { /* Ignore */ }
-        }
-        if (::playerA.isInitialized) {
-            playerA.volume = 1f
-            if (shouldPublishMasterPlayer) {
-                onPlayerSwappedListeners.forEach { it(playerA) }
-            }
-        }
-        incomingTrackReplayGainVolume = null
-        setPauseAtEndOfMediaItems(false)
-    }
-
-    fun performTransition(settings: TransitionSettings) {
-        transitionJob?.cancel()
-        transitionRunning = true
-        transitionStartedAtMs = SystemClock.elapsedRealtime()
-        transitionJob = scope.launch {
-            try {
-                performOverlapTransition(settings)
+                it.pause()
+                it.stop()
+                it.clearMediaItems()
             } catch (e: Exception) {
-                if (e !is kotlinx.coroutines.CancellationException) {
-                    Timber.tag("TransitionDebug").e(e, "Error performing transition")
-                }
-                playerA.volume = 1f
-                setPauseAtEndOfMediaItems(false)
-                playerB?.stop()
-            } finally {
-                transitionRunning = false
-                lastTransitionFinishedAtMs = SystemClock.elapsedRealtime()
-                if (transitionStartedAtMs > 0L) {
-                    PerformanceMetrics.recordTiming(
-                        PerformanceMetrics.Timings.TRANSITION,
-                        SystemClock.elapsedRealtime() - transitionStartedAtMs
-                    )
-                    transitionStartedAtMs = 0L
-                }
-                onTransitionFinishedListeners.forEach { it() }
-            }
-        }
-    }
-
-    private suspend fun performOverlapTransition(settings: TransitionSettings) {
-        val auxiliaryPlayer = playerB
-        if (auxiliaryPlayer == null || auxiliaryPlayer.mediaItemCount == 0) {
-            playerA.volume = 1f
-            setPauseAtEndOfMediaItems(false)
-            return
-        }
-
-        if (auxiliaryPlayer.playbackState == Player.STATE_IDLE) auxiliaryPlayer.prepare()
-        if (auxiliaryPlayer.playbackState == Player.STATE_BUFFERING) {
-            if (!awaitPlayerReady(auxiliaryPlayer, 3000L)) {
-                playerA.volume = 1f
-                setPauseAtEndOfMediaItems(false)
-                return
+                Timber.tag("TransitionDebug").w(
+                    e,
+                    "Failed to clear auxiliary player"
+                )
             }
         }
 
-        val outgoingStartVolume = playerA.volume.coerceIn(0f, 1f)
-        auxiliaryPlayer.volume = 0f
-        if (!playerA.isPlaying && playerA.playbackState == Player.STATE_READY) playerA.play()
-        auxiliaryPlayer.playWhenReady = true
-        auxiliaryPlayer.play()
-
-        val outgoingPlayer = playerA
-        val incomingPlayer = auxiliaryPlayer
-
-        incomingPlayer.repeatMode = outgoingPlayer.repeatMode
-        incomingPlayer.shuffleModeEnabled = outgoingPlayer.shuffleModeEnabled
-        outgoingPlayer.pauseAtEndOfMediaItems = true
-        incomingPlayer.pauseAtEndOfMediaItems = false
-        onTransitionDisplayPlayerListeners.forEach { it(incomingPlayer) }
-
-        val duration = settings.durationMs.toLong().coerceAtLeast(500L)
-        val stepMs = 32L
-        val startedAtMs = SystemClock.elapsedRealtime()
-
-        while (true) {
-            val elapsed = (SystemClock.elapsedRealtime() - startedAtMs).coerceAtMost(duration)
-            val progress = (elapsed.toFloat() / duration).coerceIn(0f, 1f)
-            val volIn = envelope(progress, settings.curveIn)
-            val volOut = 1f - envelope(progress, settings.curveOut)
-            val incomingTarget = incomingTrackReplayGainVolume ?: 1f
-            incomingPlayer.volume = (volIn * incomingTarget).coerceIn(0f, 1f)
-            outgoingPlayer.volume = (volOut * outgoingStartVolume).coerceIn(0f, 1f)
-
-            if (elapsed >= duration) break
-            delay(stepMs)
-        }
-
-        outgoingPlayer.volume = 0f
-        incomingPlayer.volume = incomingTrackReplayGainVolume ?: 1f
-        incomingTrackReplayGainVolume = null
-
-        removeMasterPlayerListeners(outgoingPlayer)
-
-        playerA = incomingPlayer
-        playerB = outgoingPlayer
-        activeWindowStartIndex = preparedWindowStartIndex
-        activePlayerUsesWindowedQueue = preparedPlayerUsesWindowedQueue
+        playerB = null
         resetPreparedWindowState()
-
-        playerA.pauseAtEndOfMediaItems = false
-        playerB?.pauseAtEndOfMediaItems = false
-        addMasterPlayerListeners(playerA)
-        if (playerA.playWhenReady) requestAudioFocus()
-
-        onPlayerSwappedListeners.forEach { it(playerA) }
-        _activeAudioSessionId.value = playerA.audioSessionId
-
-        playerB?.pause()
-        playerB?.stop()
-        playerB?.clearMediaItems()
-
-        setPauseAtEndOfMediaItems(false)
     }
 
     private fun ensureQueueSnapshot(): List<MediaItem> {
         // Single guard: isEmpty() short-circuits the windowed-queue size check, so
         // refreshQueueSnapshotFromMaster() is called at most once per invocation.
-        if (queueSnapshot.isEmpty() ||
-            (!activePlayerUsesWindowedQueue && queueSnapshot.size != playerA.mediaItemCount)
+        if (
+            queueSnapshot.isEmpty() ||
+            (
+                !activePlayerUsesWindowedQueue &&
+                    queueSnapshot.size != playerA.mediaItemCount
+                )
         ) {
-            refreshQueueSnapshotFromMaster(windowStartIndex = 0, usesWindowedQueue = false)
+            refreshQueueSnapshotFromMaster(
+                windowStartIndex = 0,
+                usesWindowedQueue = false
+            )
         }
+
         return queueSnapshot
     }
 
-    private fun refreshQueueSnapshotFromMaster(windowStartIndex: Int, usesWindowedQueue: Boolean) {
+    private fun refreshQueueSnapshotFromMaster(
+        windowStartIndex: Int,
+        usesWindowedQueue: Boolean
+    ) {
         if (!::playerA.isInitialized) return
 
         val count = playerA.mediaItemCount
+
         if (count <= 0) {
             queueSnapshot = emptyList()
             activeWindowStartIndex = 0
@@ -1484,6 +1883,7 @@ class DualPlayerEngine @Inject constructor(
         }
 
         val items = ArrayList<MediaItem>(count)
+
         for (i in 0 until count) {
             items.add(playerA.getMediaItemAt(i))
         }
@@ -1493,24 +1893,40 @@ class DualPlayerEngine @Inject constructor(
         activePlayerUsesWindowedQueue = usesWindowedQueue
     }
 
-    private fun resolveCurrentAbsoluteIndex(mediaItem: MediaItem, snapshot: List<MediaItem>): Int {
-        if (snapshot.isEmpty()) return C.INDEX_UNSET
+    private fun resolveCurrentAbsoluteIndex(
+        mediaItem: MediaItem,
+        snapshot: List<MediaItem>
+    ): Int {
+        if (snapshot.isEmpty()) {
+            return C.INDEX_UNSET
+        }
 
         val playerIndex = playerA.currentMediaItemIndex
+
         if (activePlayerUsesWindowedQueue) {
-            val absoluteIndex = activeWindowStartIndex + playerIndex
-            if (absoluteIndex in snapshot.indices &&
-                snapshot[absoluteIndex].mediaId == mediaItem.mediaId
+            val absoluteIndex =
+                activeWindowStartIndex + playerIndex
+
+            if (
+                absoluteIndex in snapshot.indices &&
+                snapshot[absoluteIndex].mediaId ==
+                mediaItem.mediaId
             ) {
                 return absoluteIndex
             }
-        } else if (playerIndex in snapshot.indices &&
-            snapshot[playerIndex].mediaId == mediaItem.mediaId
+        } else if (
+            playerIndex in snapshot.indices &&
+            snapshot[playerIndex].mediaId ==
+            mediaItem.mediaId
         ) {
             return playerIndex
         }
 
-        return findMediaItemIndex(snapshot, mediaItem.mediaId, preferAfterExclusive = C.INDEX_UNSET)
+        return findMediaItemIndex(
+            items = snapshot,
+            mediaId = mediaItem.mediaId,
+            preferAfterExclusive = C.INDEX_UNSET
+        )
     }
 
     private fun findMediaItemIndex(
@@ -1519,22 +1935,47 @@ class DualPlayerEngine @Inject constructor(
         preferAfterExclusive: Int
     ): Int {
         var fallback = C.INDEX_UNSET
+
         for (i in items.indices) {
             if (items[i].mediaId == mediaId) {
-                if (preferAfterExclusive != C.INDEX_UNSET && i > preferAfterExclusive) return i
-                if (fallback == C.INDEX_UNSET) fallback = i
+                if (
+                    preferAfterExclusive != C.INDEX_UNSET &&
+                    i > preferAfterExclusive
+                ) {
+                    return i
+                }
+
+                if (fallback == C.INDEX_UNSET) {
+                    fallback = i
+                }
             }
         }
+
         return fallback
     }
 
-    private fun auxiliaryWindowBounds(targetIndex: Int, count: Int): Pair<Int, Int> {
-        if (count <= MAX_AUXILIARY_TIMELINE_ITEMS) return 0 to count
+    private fun auxiliaryWindowBounds(
+        targetIndex: Int,
+        count: Int
+    ): Pair<Int, Int> {
+        if (count <= MAX_AUXILIARY_TIMELINE_ITEMS) {
+            return 0 to count
+        }
 
-        val halfWindow = MAX_AUXILIARY_TIMELINE_ITEMS / 2
-        var start = (targetIndex - halfWindow).coerceAtLeast(0)
-        var end = (start + MAX_AUXILIARY_TIMELINE_ITEMS).coerceAtMost(count)
-        start = (end - MAX_AUXILIARY_TIMELINE_ITEMS).coerceAtLeast(0)
+        val halfWindow =
+            MAX_AUXILIARY_TIMELINE_ITEMS / 2
+
+        var start =
+            (targetIndex - halfWindow).coerceAtLeast(0)
+
+        var end =
+            (start + MAX_AUXILIARY_TIMELINE_ITEMS)
+                .coerceAtMost(count)
+
+        start =
+            (end - MAX_AUXILIARY_TIMELINE_ITEMS)
+                .coerceAtLeast(0)
+
         return start to end
     }
 
@@ -1543,24 +1984,44 @@ class DualPlayerEngine @Inject constructor(
         preparedPlayerUsesWindowedQueue = false
     }
 
-    private suspend fun awaitPlayerReady(player: ExoPlayer, timeoutMs: Long): Boolean {
-        if (player.playbackState == Player.STATE_READY) return true
+    private suspend fun awaitPlayerReady(
+        player: ExoPlayer,
+        timeoutMs: Long
+    ): Boolean {
+        if (player.playbackState == Player.STATE_READY) {
+            return true
+        }
+
         return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
             suspendCancellableCoroutine { cont ->
                 val listener = object : Player.Listener {
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (playbackState != Player.STATE_BUFFERING) {
+                    override fun onPlaybackStateChanged(
+                        playbackState: Int
+                    ) {
+                        if (
+                            playbackState !=
+                            Player.STATE_BUFFERING
+                        ) {
                             player.removeListener(this)
-                            if (cont.isActive) cont.resume(playbackState == Player.STATE_READY)
+
+                            if (cont.isActive) {
+                                cont.resume(
+                                    playbackState ==
+                                        Player.STATE_READY
+                                )
+                            }
                         }
                     }
                 }
+
                 player.addListener(listener)
-                cont.invokeOnCancellation { player.removeListener(listener) }
+
+                cont.invokeOnCancellation {
+                    player.removeListener(listener)
+                }
             }
         } ?: false
     }
-
 
     fun release() {
         transitionJob?.cancel()
@@ -1568,11 +2029,13 @@ class DualPlayerEngine @Inject constructor(
         cancelAudioOffloadFallback()
         scope.coroutineContext[Job]?.cancel()
         abandonAudioFocus()
+
         if (::playerA.isInitialized) {
             removeMasterPlayerListeners(playerA)
             onPlayerAboutToBeReleasedListener?.invoke(playerA)
             playerA.release()
         }
+
         playerB?.release()
         playerB = null
         isReleased = true
