@@ -127,11 +127,25 @@ object MediaItemBuilder {
         }
     }
 
-    fun playbackUri(song: Song): Uri = playbackUri(
+fun playbackUri(song: Song): Uri {
+    if (
+        song.contentUriString.isBlank() &&
+        song.id.isNotBlank() &&
+        (
+            song.id.startsWith("youtube:") ||
+            song.id.length == 11
+        )
+    ) {
+        val videoId = song.id.removePrefix("youtube:")
+        return Uri.parse("youtube://$videoId")
+    }
+
+    return playbackUri(
         contentUriString = song.contentUriString,
         filePath = song.path,
         mimeType = song.mimeType
     )
+}
 
     internal fun playbackMimeType(song: Song): String? = playbackMimeType(
         contentUriString = song.contentUriString,
