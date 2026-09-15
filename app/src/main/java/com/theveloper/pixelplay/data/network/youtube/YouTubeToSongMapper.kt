@@ -61,18 +61,40 @@ object YouTubeToSongMapper {
     )
 
     fun mapToSong(videoItem: StreamInfoItem): Song {
-        val artist = videoItem.uploaderName ?: "Unknown Artist"
+
+        val artist =
+            videoItem.uploaderName ?: "Unknown Artist"
 
         val videoId =
             extractVideoIdFromUrl(videoItem.url) ?: "unknown"
 
-        val songId = "youtube_$videoId"
+        val songId =
+            "youtube_$videoId"
 
-        val durationMs = videoItem.duration * 1000L
+        val durationMs =
+            videoItem.duration * 1000L
 
-        val thumbnailUrl = videoItem.thumbnails
-            .maxByOrNull { it.height }
-            ?.url ?: ""
+        /*
+         * YouTube's own image CDN provides substantially better
+         * thumbnails than relying on whatever thumbnail NewPipe
+         * happens to expose as its largest entry.
+         *
+         * maxresdefault.jpg is normally 1280x720.
+         *
+         * hqdefault.jpg is retained as the fallback for videos
+         * that do not have a max-resolution thumbnail.
+         */
+        val thumbnailUrl =
+            if (videoId != "unknown") {
+                "https://i.ytimg.com/vi/$videoId/maxresdefault.jpg"
+            } else {
+                videoItem.thumbnails
+                    .maxByOrNull {
+                        (it.width.toLong() * it.height.toLong())
+                    }
+                    ?.url
+                    ?: ""
+            }
 
         return Song(
             id = songId,
@@ -103,6 +125,7 @@ object YouTubeToSongMapper {
     fun mapToSongs(
         videoItems: List<StreamInfoItem>
     ): List<Song> {
+
         return videoItems
             .filter(::isLikelyMusicContent)
             .mapNotNull { item ->
@@ -117,11 +140,15 @@ object YouTubeToSongMapper {
     fun isLikelyMusicContent(
         videoItem: StreamInfoItem
     ): Boolean {
-        val title = videoItem.name.lowercase()
+
+        val title =
+            videoItem.name.lowercase()
+
         val uploader =
             (videoItem.uploaderName ?: "").lowercase()
 
-        val durationSeconds = videoItem.duration
+        val durationSeconds =
+            videoItem.duration
 
         if (
             videoItem.isShortFormContent ||
@@ -131,13 +158,22 @@ object YouTubeToSongMapper {
         }
 
         val hasMusicSignal =
-            musicTitleSignals.any { it in title } ||
-                musicUploaderSignals.any { it in uploader }
+            musicTitleSignals.any {
+                it in title
+            } ||
+                musicUploaderSignals.any {
+                    it in uploader
+                }
 
         val hasNonMusicSignal =
-            nonMusicSignals.any { it in title }
+            nonMusicSignals.any {
+                it in title
+            }
 
-        if (hasNonMusicSignal && !hasMusicSignal) {
+        if (
+            hasNonMusicSignal &&
+            !hasMusicSignal
+        ) {
             return false
         }
 
@@ -153,12 +189,20 @@ object YouTubeToSongMapper {
             durationSeconds in 45..(12 * 60)
     }
 
-    fun musicSearchQuery(query: String): String {
-        val normalizedQuery = query.trim()
-        val lowerQuery = normalizedQuery.lowercase()
+    fun musicSearchQuery(
+        query: String
+    ): String {
+
+        val normalizedQuery =
+            query.trim()
+
+        val lowerQuery =
+            normalizedQuery.lowercase()
 
         return if (
-            musicTitleSignals.any { it in lowerQuery }
+            musicTitleSignals.any {
+                it in lowerQuery
+            }
         ) {
             normalizedQuery
         } else {
@@ -169,7 +213,12 @@ object YouTubeToSongMapper {
     private fun looksLikeArtistTitle(
         title: String
     ): Boolean {
-        val parts = title.split(" - ", limit = 2)
+
+        val parts =
+            title.split(
+                " - ",
+                limit = 2
+            )
 
         return parts.size == 2 &&
             parts.all {
@@ -177,9 +226,16 @@ object YouTubeToSongMapper {
             }
     }
 
-    fun extractVideoId(songId: String): String? {
-        return if (songId.startsWith("youtube_")) {
-            songId.removePrefix("youtube_")
+    fun extractVideoId(
+        songId: String
+    ): String? {
+
+        return if (
+            songId.startsWith("youtube_")
+        ) {
+            songId.removePrefix(
+                "youtube_"
+            )
         } else {
             null
         }
@@ -188,37 +244,68 @@ object YouTubeToSongMapper {
     private fun extractVideoIdFromUrl(
         url: String
     ): String? {
+
         return try {
+
             when {
-                url.contains("youtube.com/watch?v=") -> {
-                    url.substringAfter("v=")
-                        .substringBefore("&")
+
+                url.contains(
+                    "youtube.com/watch?v="
+                ) -> {
+
+                    url.substringAfter(
+                        "v="
+                    ).substringBefore(
+                        "&"
+                    )
                 }
 
-                url.contains("youtu.be/") -> {
-                    url.substringAfter("youtu.be/")
-                        .substringBefore("?")
+                url.contains(
+                    "youtu.be/"
+                ) -> {
+
+                    url.substringAfter(
+                        "youtu.be/"
+                    ).substringBefore(
+                        "?"
+                    )
                 }
 
-                url.startsWith("/watch?v=") -> {
-                    url.substringAfter("v=")
-                        .substringBefore("&")
+                url.startsWith(
+                    "/watch?v="
+                ) -> {
+
+                    url.substringAfter(
+                        "v="
+                    ).substringBefore(
+                        "&"
+                    )
                 }
 
                 url.matches(
-                    Regex("[a-zA-Z0-9_-]{11}")
+                    Regex(
+                        "[a-zA-Z0-9_-]{11}"
+                    )
                 ) -> {
+
                     url
                 }
 
                 else -> null
             }
+
         } catch (_: Exception) {
+
             null
         }
     }
 
-    fun isYouTubeSong(song: Song): Boolean {
-        return song.id.startsWith("youtube_")
+    fun isYouTubeSong(
+        song: Song
+    ): Boolean {
+
+        return song.id.startsWith(
+            "youtube_"
+        )
     }
 }
