@@ -246,6 +246,23 @@
             android:name=".data.service.wear.WatchTransferForegroundService"
             android:foregroundServiceType="dataSync"
             android:exported="false" />
+
+        <!--
+             WorkManager runs any worker's setForeground() call through its own
+             androidx.work.impl.foreground.SystemForegroundService. That service's own manifest
+             entry (from the work-runtime library) doesn't declare a foregroundServiceType, but
+             Android 14+ requires one on the <service> element itself (not just passed at
+             runtime via ForegroundInfo) or startForeground() throws
+             MissingForegroundServiceTypeException. MoodAnalysisWorker uses this to keep local
+             Music Square analysis running with the screen off / app backgrounded, via
+             ForegroundInfo(..., ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) — this override
+             has to match that same type.
+        -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+
         <meta-data
             android:name="preloaded_fonts"
             android:resource="@array/preloaded_fonts" />
