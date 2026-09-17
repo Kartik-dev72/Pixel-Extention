@@ -33,6 +33,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.PlaylistAdd
 import androidx.compose.material.icons.automirrored.rounded.Sort
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.Shuffle
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Dataset
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.PhoneAndroid
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
@@ -92,6 +94,8 @@ fun LibraryActionRow(
     showLocateButton: Boolean = false,
     showImportButton: Boolean = true,
     isPlaylistTab: Boolean,
+    isSquareTab: Boolean = false,
+    onSquareSettingsClick: () -> Unit = {},
     onImportM3uClick: () -> Unit = {},
     isFoldersTab: Boolean,
     modifier: Modifier = Modifier,
@@ -170,16 +174,20 @@ fun LibraryActionRow(
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
                         modifier = Modifier.height(genHeight)
                     ) {
-                        val icon = if (isPlaylistTab) Icons.AutoMirrored.Rounded.PlaylistAdd else Icons.Rounded.Shuffle
-                        val text = if (isPlaylistTab) {
-                            stringResource(R.string.library_action_new)
-                        } else {
-                            stringResource(R.string.common_shuffle)
+                        val icon = when {
+                            isPlaylistTab -> Icons.AutoMirrored.Rounded.PlaylistAdd
+                            isSquareTab -> Icons.Rounded.AutoAwesome
+                            else -> Icons.Rounded.Shuffle
                         }
-                        val contentDesc = if (isPlaylistTab) {
-                            stringResource(R.string.library_cd_create_new_playlist)
-                        } else {
-                            stringResource(R.string.common_shuffle_play)
+                        val text = when {
+                            isPlaylistTab -> stringResource(R.string.library_action_new)
+                            isSquareTab -> "Build Playlist"
+                            else -> stringResource(R.string.common_shuffle)
+                        }
+                        val contentDesc = when {
+                            isPlaylistTab -> stringResource(R.string.library_cd_create_new_playlist)
+                            isSquareTab -> "Build a playlist from the Music Square"
+                            else -> stringResource(R.string.common_shuffle_play)
                         }
 
                         Row(
@@ -271,7 +279,20 @@ fun LibraryActionRow(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        if (showSortButton) {
+        if (isSquareTab) {
+            // The Square tab has nothing to sort or filter — its own settings (import / analyze
+            // locally / export) live behind a cog in this same rightmost slot instead.
+            FilledTonalIconButton(
+                onClick = onSquareSettingsClick,
+                shape = RoundedCornerShape(26.dp),
+                modifier = Modifier.size(genHeight)
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Settings,
+                    contentDescription = stringResource(R.string.music_square_settings_cd)
+                )
+            }
+        } else if (showSortButton) {
             val outerCorner = 26.dp
             
             // Logic for Sort Button (Rightmost)

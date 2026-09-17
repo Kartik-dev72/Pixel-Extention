@@ -34,9 +34,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         JellyfinSongEntity::class,
         JellyfinPlaylistEntity::class,
         AiCacheEntity::class,
-        AiUsageEntity::class
+        AiUsageEntity::class,
+        SongMoodEntity::class
     ],
-    version = 42,
+    version = 43,
     exportSchema = true
 )
 abstract class PixelPlayDatabase : RoomDatabase() {
@@ -56,6 +57,7 @@ abstract class PixelPlayDatabase : RoomDatabase() {
     abstract fun jellyfinDao(): JellyfinDao
     abstract fun aiCacheDao(): AiCacheDao
     abstract fun aiUsageDao(): AiUsageDao
+    abstract fun songMoodDao(): SongMoodDao
 
     companion object {
         // Gap-bridging no-op migrations for missing version ranges.
@@ -646,6 +648,34 @@ abstract class PixelPlayDatabase : RoomDatabase() {
                     """.trimIndent()
                 )
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_albums_album_artist ON albums(album_artist)")
+            }
+        }
+
+        val MIGRATION_42_43 = object : Migration(42, 43) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                        CREATE TABLE IF NOT EXISTS song_moods (
+                            song_id INTEGER NOT NULL PRIMARY KEY,
+                            tempo_bpm REAL,
+                            rms_loudness REAL,
+                            onset_density REAL,
+                            brightness REAL,
+                            tonality REAL,
+                            genre_energy_prior REAL NOT NULL,
+                            genre_valence_prior REAL NOT NULL,
+                            source TEXT NOT NULL DEFAULT 'genre_only',
+                            analysis_version INTEGER NOT NULL DEFAULT 1,
+                            analyzed_at INTEGER NOT NULL
+                        )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_song_moods_analysis_version ON song_moods(analysis_version)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_song_moods_source ON song_moods(source)"
+                )
             }
         }
 

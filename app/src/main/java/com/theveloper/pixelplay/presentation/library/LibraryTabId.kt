@@ -96,6 +96,12 @@ enum class LibraryTabId(
             SortOption.LikedSongDateLiked,
             SortOption.LikedSongDateLikedAsc
         )
+    ),
+    Square(
+        stableKey = "SQUARE",
+        label = "SQUARE",
+        labelRes = R.string.library_tab_square,
+        sortOptions = emptyList()
     );
 
     companion object {

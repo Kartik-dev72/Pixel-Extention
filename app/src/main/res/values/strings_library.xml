@@ -13,6 +13,7 @@
     <string name="library_tab_playlists">Playlists</string>
     <string name="library_tab_folders">Folders</string>
     <string name="library_tab_liked">Liked</string>
+    <string name="library_tab_square">Square</string>
 
     <!-- Library Toasts -->
     <string name="library_toast_playlist_created">Playlist created successfully</string>
@@ -121,6 +122,70 @@
     <string name="library_empty_folders_subtitle">Internal storage folders with music will appear here.</string>
     <string name="library_empty_playlists_title">No playlists yet</string>
     <string name="library_empty_playlists_subtitle">Create your first playlist to organize your library.</string>
+    <string name="music_square_axis_x_calm">Calm</string>
+    <string name="music_square_axis_x_exciting">Exciting</string>
+    <string name="music_square_axis_y_sad">Sad</string>
+    <string name="music_square_axis_y_joyful">Joyful</string>
+    <string name="music_square_empty_title">No songs analyzed yet</string>
+    <string name="music_square_empty_subtitle">PixelPlay listens to a short sample of each track to place it here by mood — calm to exciting, sad to joyful.</string>
+    <string name="music_square_analyze_button">Analyze my library</string>
+    <string name="music_square_analyzing_progress">Analyzing your library… %1$d / %2$d</string>
+    <string name="music_square_probe_hint">Tap or drag anywhere to build a mix from nearby-sounding tracks.</string>
+    <string name="music_square_cd_probe">Mood probe</string>
+
+    <string name="music_square_welcome_title">Welcome to Music Square</string>
+    <string name="music_square_welcome_subtitle">PixelPlay can place your library on the square by analyzing it on this device, or by importing analysis you already ran with the desktop tool.</string>
+    <string name="music_square_welcome_import">Import my data</string>
+    <string name="music_square_welcome_analyze">Analyze locally</string>
+
+    <string name="music_square_snippet_title">How much of each song?</string>
+    <string name="music_square_snippet_subtitle">A shorter sample analyzes faster; the full song is slower but more accurate for tracks that change mood partway through.</string>
+    <string name="music_square_snippet_15s">15 seconds</string>
+    <string name="music_square_snippet_25s">25 seconds (recommended)</string>
+    <string name="music_square_snippet_45s">45 seconds</string>
+    <string name="music_square_snippet_full">Full song</string>
+    <string name="music_square_snippet_back">Back</string>
+
+    <string name="music_square_import_picker_title">Select your Music Square export</string>
+    <string name="music_square_import_importing">Matching your library against the imported analysis…</string>
+    <string name="music_square_import_done">Imported %1$d of %2$d tracks from your export.</string>
+    <string name="music_square_import_error">Import failed: %1$s</string>
+
+    <string name="music_square_settings_cd">Music Square settings</string>
+    <string name="music_square_settings_title">Music Square settings</string>
+    <string name="music_square_settings_analyze">Analyze locally</string>
+    <string name="music_square_settings_analyze_subtitle">Re-analyze your library on this device with new sampling settings.</string>
+    <string name="music_square_settings_import">Import my data</string>
+    <string name="music_square_settings_import_subtitle">Bring in analysis you already ran with the desktop tool.</string>
+    <string name="music_square_settings_export">Export my data</string>
+    <string name="music_square_settings_export_subtitle">Save this device\'s analysis as a Music Square export.</string>
+    <string name="music_square_settings_close">Close</string>
+
+    <string name="music_square_mood_shuffle">Mood Shuffle</string>
+    <string name="music_square_mood_mellow">Mellow</string>
+    <string name="music_square_mood_mellow_desc">Calm &amp; joyful</string>
+    <string name="music_square_mood_upbeat">Upbeat</string>
+    <string name="music_square_mood_upbeat_desc">Exciting &amp; joyful</string>
+    <string name="music_square_mood_moody">Moody</string>
+    <string name="music_square_mood_moody_desc">Calm &amp; sad</string>
+    <string name="music_square_mood_intense">Intense</string>
+    <string name="music_square_mood_intense_desc">Exciting &amp; sad</string>
+
+    <string name="music_square_search_hint">Filter by artist or title…</string>
+    <string name="music_square_search_cd_clear">Clear search</string>
+
+    <string name="music_square_offset_title">Where in each song?</string>
+    <string name="music_square_offset_subtitle">Skip past intros by starting the sample partway into the track.</string>
+    <string name="music_square_offset_0">From the start</string>
+    <string name="music_square_offset_10">10% in</string>
+    <string name="music_square_offset_30">30% in (recommended)</string>
+    <string name="music_square_offset_50">Halfway</string>
+
+    <string name="music_square_export_done">Exported %1$d tracks.</string>
+    <string name="music_square_export_error">Export failed: %1$s</string>
+
+    <string name="music_square_notification_channel_name">Music Square analysis</string>
+    <string name="music_square_notification_title">Analyzing your music</string>
 
     <!-- SongInfoBottomSheet, MultiSelectionBottomSheet, PlaylistMultiSelectionBottomSheet -->
     <string name="song_info_cd_edit_metadata">Edit song metadata</string>

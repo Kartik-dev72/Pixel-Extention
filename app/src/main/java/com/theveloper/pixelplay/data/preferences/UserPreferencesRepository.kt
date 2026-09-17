@@ -122,6 +122,7 @@ class UserPreferencesRepository @Inject constructor(
         val NAV_BAR_CORNER_RADIUS = intPreferencesKey("nav_bar_corner_radius")
         val NAV_BAR_STYLE = stringPreferencesKey("nav_bar_style")
         val NAV_BAR_COMPACT_MODE = booleanPreferencesKey("nav_bar_compact_mode")
+        val MOOD_ANALYZE_FULL_SONG = booleanPreferencesKey("mood_analyze_full_song")
         val CAROUSEL_STYLE = stringPreferencesKey("carousel_style")
         val LIBRARY_NAVIGATION_MODE = stringPreferencesKey("library_navigation_mode")
         val LAUNCH_TAB = stringPreferencesKey("launch_tab")
@@ -976,6 +977,16 @@ suspend fun markDirectoryRulesVersionApplied(version: Int) {
 
     suspend fun setNavBarCompactMode(enabled: Boolean) {
         dataStore.edit { it[PreferencesKeys.NAV_BAR_COMPACT_MODE] = enabled }
+    }
+
+    /** Whether Music Square analysis samples a ~60s window per song (false, default — much
+     * faster on a big library) or decodes each entire track (true — more accurate for songs
+     * with a big shift between intro and chorus, but noticeably slower to analyze). */
+    val moodAnalyzeFullSongFlow: Flow<Boolean> =
+        pref { it[PreferencesKeys.MOOD_ANALYZE_FULL_SONG] ?: false }
+
+    suspend fun setMoodAnalyzeFullSong(enabled: Boolean) {
+        dataStore.edit { it[PreferencesKeys.MOOD_ANALYZE_FULL_SONG] = enabled }
     }
 
     val libraryNavigationModeFlow: Flow<String> =

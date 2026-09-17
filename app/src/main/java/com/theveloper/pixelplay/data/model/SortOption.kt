@@ -502,6 +502,9 @@ sealed class SortOption(
             )
         }
 
+        /** The Music Square is positioned by mood, not sorted, so this is intentionally empty. */
+        val SQUARE: List<SortOption> = emptyList()
+
         private val ALL: List<SortOption> by lazy {
             SONGS + ALBUMS + ARTISTS + PLAYLISTS + FOLDERS + LIKED
         }

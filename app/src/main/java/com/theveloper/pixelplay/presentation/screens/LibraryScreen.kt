@@ -147,6 +147,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.ui.res.stringResource
 import com.theveloper.pixelplay.presentation.components.PlaylistArtCollage
+import com.theveloper.pixelplay.presentation.components.SongPickerBottomSheet
 import com.theveloper.pixelplay.presentation.components.ReorderTabsSheet
 import com.theveloper.pixelplay.presentation.components.EditMultipleSongsSheet
 import com.theveloper.pixelplay.presentation.components.SongInfoBottomSheet
@@ -160,6 +161,7 @@ import com.theveloper.pixelplay.presentation.components.CreateAiPlaylistDialog
 import com.theveloper.pixelplay.presentation.components.subcomps.SelectionActionRow
 import com.theveloper.pixelplay.presentation.components.subcomps.SelectionCountPill
 import com.theveloper.pixelplay.presentation.viewmodel.ColorSchemePair
+import com.theveloper.pixelplay.presentation.viewmodel.MusicSquareViewModel
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerUiState
 import com.theveloper.pixelplay.presentation.viewmodel.PlayerViewModel
 import com.theveloper.pixelplay.presentation.viewmodel.StablePlayerState
@@ -435,7 +437,8 @@ fun LibraryScreen(
     playerViewModel: PlayerViewModel = hiltViewModel(),
     playlistViewModel: PlaylistViewModel = hiltViewModel(),
     libraryViewModel: LibraryViewModel = hiltViewModel(),
-    songInfoBottomSheetViewModel: SongInfoBottomSheetViewModel = hiltViewModel()
+    songInfoBottomSheetViewModel: SongInfoBottomSheetViewModel = hiltViewModel(),
+    musicSquareViewModel: MusicSquareViewModel = hiltViewModel()
 ) {
     // La recolección de estados de alto nivel se mantiene mínima.
     val context = LocalContext.current // Added context
@@ -498,6 +501,10 @@ fun LibraryScreen(
     var showPlaylistCreationTypeDialog by remember { mutableStateOf(false) }
     var showCreateAiPlaylistDialog by remember { mutableStateOf(false) }
     var aiGenerationRequestedFromDialog by remember { mutableStateOf(false) }
+    var showSquareSeedPicker by remember { mutableStateOf(false) }
+    var pendingSquareSeedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showSquarePlaylistNameDialog by remember { mutableStateOf(false) }
+    var squarePlaylistNameInput by remember { mutableStateOf("") }
 
     val m3uImportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -693,6 +700,7 @@ fun LibraryScreen(
                 LibraryTabId.LIKED,
                 LibraryTabId.FOLDERS -> isSelectionMode
                 LibraryTabId.ARTISTS -> false
+                LibraryTabId.SQUARE -> false
             }
         }
     }
@@ -728,6 +736,7 @@ fun LibraryScreen(
                     }
 
                     LibraryTabId.ARTISTS -> Unit
+                    LibraryTabId.SQUARE -> Unit
                 }
             }
 
@@ -1138,6 +1147,7 @@ fun LibraryScreen(
                             LibraryTabId.PLAYLISTS -> playlistUiState.currentPlaylistSortOption
                             LibraryTabId.LIKED -> playerUiState.currentFavoriteSortOption
                             LibraryTabId.FOLDERS -> playerUiState.currentFolderSortOption
+                            LibraryTabId.SQUARE -> null
                         }
 
                         val showLocateButton = when (currentTabId) {
@@ -1162,6 +1172,7 @@ fun LibraryScreen(
                                     LibraryTabId.PLAYLISTS -> playlistViewModel.sortPlaylists(option)
                                     LibraryTabId.LIKED -> playerViewModel.sortFavoriteSongs(option)
                                     LibraryTabId.FOLDERS -> playerViewModel.sortFolders(option)
+                                    LibraryTabId.SQUARE -> Unit
                                 }
                             }
                         }
@@ -1260,6 +1271,7 @@ fun LibraryScreen(
                                             LibraryTabId.LIKED -> playerViewModel.shuffleFavoriteSongs()
                                             LibraryTabId.ALBUMS -> playerViewModel.shuffleRandomAlbum()
                                             LibraryTabId.ARTISTS -> playerViewModel.shuffleRandomArtist()
+                                            LibraryTabId.SQUARE -> showSquareSeedPicker = true
                                             else -> playerViewModel.shuffleAllSongs()
                                         }
                                     },
@@ -1269,6 +1281,8 @@ fun LibraryScreen(
                                     onSortClick = { playerViewModel.showSortingSheet() },
                                     onLocateClick = { locateAction?.invoke() },
                                     isPlaylistTab = currentTabId == LibraryTabId.PLAYLISTS,
+                                    isSquareTab = currentTabId == LibraryTabId.SQUARE,
+                                    onSquareSettingsClick = { musicSquareViewModel.openSettingsDialog() },
                                     isFoldersTab = currentTabId == LibraryTabId.FOLDERS && (!playerUiState.isFoldersPlaylistView || playerUiState.currentFolder != null),
                                     onImportM3uClick = { m3uImportLauncher.launch("audio/x-mpegurl") },
                                     currentFolder = playerUiState.currentFolder,
@@ -1683,6 +1697,13 @@ fun LibraryScreen(
                                         )
                                     }
 
+                                    LibraryTabId.SQUARE -> {
+                                        MusicSquareScreen(
+                                            playerViewModel = playerViewModel,
+                                            bottomBarHeight = bottomBarHeightDp
+                                        )
+                                    }
+
                                     null -> Unit
                                 }
                             }
@@ -1817,6 +1838,79 @@ fun LibraryScreen(
             )
         }
     )
+
+    // "Build Playlist" on the Square tab: pick seed songs, then build a mix from their nearest
+    // neighbors on the mood square.
+    if (showSquareSeedPicker) {
+        SongPickerBottomSheet(
+            initiallySelectedSongIds = emptySet(),
+            onDismiss = { showSquareSeedPicker = false },
+            onConfirm = { selectedIds ->
+                showSquareSeedPicker = false
+                if (selectedIds.isNotEmpty()) {
+                    pendingSquareSeedIds = selectedIds
+                    squarePlaylistNameInput = ""
+                    showSquarePlaylistNameDialog = true
+                }
+            }
+        )
+    }
+
+    if (showSquarePlaylistNameDialog) {
+        AlertDialog(
+            onDismissRequest = { showSquarePlaylistNameDialog = false },
+            title = { Text("Name your mix") },
+            text = {
+                Column {
+                    Text(
+                        text = "Built from ${pendingSquareSeedIds.size} seed song" +
+                            if (pendingSquareSeedIds.size == 1) "" else "s",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    OutlinedTextField(
+                        value = squarePlaylistNameInput,
+                        onValueChange = { squarePlaylistNameInput = it },
+                        label = { Text("Playlist name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = squarePlaylistNameInput.isNotBlank(),
+                    onClick = {
+                        val builtSongIds = musicSquareViewModel.buildSeedPlaylist(
+                            seedSongIds = pendingSquareSeedIds.toList()
+                        )
+                        if (builtSongIds.isNotEmpty()) {
+                            playlistViewModel.createPlaylist(
+                                name = squarePlaylistNameInput.trim(),
+                                songIds = builtSongIds
+                            )
+                        } else {
+                            Toast.makeText(
+                                context,
+                                "Couldn't build a mix from those songs — try different seeds",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                        showSquarePlaylistNameDialog = false
+                        pendingSquareSeedIds = emptySet()
+                    }
+                ) {
+                    Text("Create")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSquarePlaylistNameDialog = false }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            }
+        )
+    }
 
     if (showWatchTransferDialog && activeWatchTransfer != null) {
         val currentWatchTransfer = activeWatchTransfer!!
@@ -2804,6 +2898,7 @@ private fun LibraryTabId.iconRes(): Int = when (this) {
     LibraryTabId.PLAYLISTS -> R.drawable.rounded_playlist_play_24
     LibraryTabId.FOLDERS -> R.drawable.rounded_folder_24
     LibraryTabId.LIKED -> R.drawable.round_favorite_24
+    LibraryTabId.SQUARE -> R.drawable.rounded_grid_view_24
 }
 
 @Composable

@@ -28,6 +28,7 @@ import com.theveloper.pixelplay.data.database.LocalPlaylistDao
 import com.theveloper.pixelplay.data.database.MusicDao
 import com.theveloper.pixelplay.data.database.PixelPlayDatabase
 import com.theveloper.pixelplay.data.database.SearchHistoryDao
+import com.theveloper.pixelplay.data.database.SongMoodDao
 import com.theveloper.pixelplay.data.database.TransitionDao
 import com.theveloper.pixelplay.data.preferences.UserPreferencesRepository
 import com.theveloper.pixelplay.data.preferences.PlaylistPreferencesRepository
@@ -165,7 +166,8 @@ object AppModule {
             PixelPlayDatabase.MIGRATION_38_39,
             PixelPlayDatabase.MIGRATION_39_40,
             PixelPlayDatabase.MIGRATION_40_41,
-            PixelPlayDatabase.MIGRATION_41_42
+            PixelPlayDatabase.MIGRATION_41_42,
+            PixelPlayDatabase.MIGRATION_42_43
         )
             .addCallback(PixelPlayDatabase.createRuntimeArtifactsCallback())
             .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
@@ -196,6 +198,12 @@ object AppModule {
     @Provides
     fun provideMusicDao(database: PixelPlayDatabase): MusicDao { // Proveer MusicDao
         return database.musicDao()
+    }
+
+    @Singleton
+    @Provides
+    fun provideSongMoodDao(database: PixelPlayDatabase): SongMoodDao {
+        return database.songMoodDao()
     }
 
     @Singleton

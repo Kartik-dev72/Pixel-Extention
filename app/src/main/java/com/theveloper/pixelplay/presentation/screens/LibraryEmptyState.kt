@@ -122,6 +122,14 @@ private fun libraryEmptySpec(
             titleRes = R.string.library_empty_playlists_title,
             subtitleRes = R.string.library_empty_playlists_subtitle
         )
+
+        // MusicSquareScreen renders its own dedicated empty/analyzing state instead of this
+        // generic one, since it needs a progress bar and an "Analyze" action rather than plain text.
+        LibraryTabId.SQUARE -> LibraryEmptySpec(
+            iconRes = R.drawable.rounded_grid_view_24,
+            titleRes = R.string.music_square_empty_title,
+            subtitleRes = R.string.music_square_empty_subtitle
+        )
     }
 }
 
