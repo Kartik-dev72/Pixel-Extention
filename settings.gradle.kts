@@ -33,6 +33,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "PixelPlay"
 include(":app")
+include(":extension-api")
 include(":shared")
 include(":wear")
 include(":baselineprofile")

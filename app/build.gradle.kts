@@ -347,6 +347,7 @@ dependencies {
 
     // Projects
     implementation(project(":shared"))
+    implementation(project(":extension-api"))
 
     // Testing (Unit)
     testImplementation(libs.junit.jupiter.api)

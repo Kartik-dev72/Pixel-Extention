@@ -74,6 +74,9 @@ class PixelPlayApplication : Application(), ImageLoaderFactory, Configuration.Pr
     @Inject
     lateinit var advancedPerformanceDiagnosticsController: dagger.Lazy<AdvancedPerformanceDiagnosticsController>
 
+    @Inject
+    lateinit var extensionRepository: dagger.Lazy<com.theveloper.pixelplay.data.extension.ExtensionRepository>
+
     private val startupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     companion object {
@@ -149,6 +152,13 @@ class PixelPlayApplication : Application(), ImageLoaderFactory, Configuration.Pr
             if (savedLimit != null) {
                 AlbumArtCacheManager.configuredCacheLimitMb = savedLimit.toLong()
             }
+        }
+
+        // Discover + load any installed PixelPlay extension APKs. Isolated in its own
+        // startupScope launch so a broken extension can never affect the block above.
+        startupScope.launch {
+            runCatching { extensionRepository.get().refresh() }
+                .onFailure { e -> Timber.e(e, "Extension discovery/load failed at startup") }
         }
     }
 
