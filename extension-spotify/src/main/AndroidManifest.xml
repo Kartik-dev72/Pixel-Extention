@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Same marker + metadata keys the YouTube extension declares; PixelPlay's discovery reads these. -->
+    <uses-feature
+        android:name="com.theveloper.pixelplay.extension.music"
+        android:required="false" />
+
+    <application
+        android:allowBackup="false"
+        android:label="Spotify">
+
+        <meta-data
+            android:name="com.theveloper.pixelplay.extension.id"
+            android:value="com.theveloper.pixelplay.extension.spotify" />
+        <meta-data
+            android:name="com.theveloper.pixelplay.extension.class"
+            android:value="com.theveloper.pixelplay.extension.spotify.SpotifyMusicExtension" />
+        <meta-data
+            android:name="com.theveloper.pixelplay.extension.name"
+            android:value="Spotify" />
+        <meta-data
+            android:name="com.theveloper.pixelplay.extension.version"
+            android:value="1.1.0" />
+        <meta-data
+            android:name="com.theveloper.pixelplay.extension.author"
+            android:value="Community" />
+        <meta-data
+            android:name="com.theveloper.pixelplay.extension.description"
+            android:value="Search and discover on Spotify; audio from YouTube, lyrics from LRCLIB." />
+    </application>
+</manifest>

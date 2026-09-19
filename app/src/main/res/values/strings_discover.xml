@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="discover_screen_title">Discover</string>
+    <string name="discover_refresh">Refresh</string>
+    <string name="discover_open_extensions">Manage extensions</string>
+    <string name="discover_empty_title">No Discover feeds yet</string>
+    <string name="discover_empty_subtitle">Enable the YouTube or Spotify extension to see recommendations here.</string>
+    <string name="discover_tab_empty">Nothing to show here yet</string>
+    <string name="discover_error_title">Couldn\'t load %1$s</string>
+    <string name="discover_retry">Try again</string>
+    <string name="discover_extension_settings">Extension settings</string>
+</resources>
