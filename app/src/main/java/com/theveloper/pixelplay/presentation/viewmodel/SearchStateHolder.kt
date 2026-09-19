@@ -3,6 +3,10 @@ package com.theveloper.pixelplay.presentation.viewmodel
 import com.theveloper.pixelplay.data.model.SearchFilterType
 import com.theveloper.pixelplay.data.model.SearchHistoryItem
 import com.theveloper.pixelplay.data.model.SearchResultItem
+import com.theveloper.pixelplay.data.extension.ExtensionCallResult
+import com.theveloper.pixelplay.data.extension.ExtensionRepository
+import com.theveloper.pixelplay.data.extension.ExtensionSongMapper
+import com.theveloper.pixelplay.data.model.Song
 import com.theveloper.pixelplay.data.repository.MusicRepository
 import kotlinx.collections.immutable.ImmutableList
 import kotlinx.collections.immutable.persistentListOf
@@ -31,15 +35,39 @@ import javax.inject.Singleton
  *
  * Responsibilities:
  * - Local/library search
+ * - Online song search through enabled extensions (YouTube, Spotify, ...)
  * - Search filter management
  * - Search history CRUD operations
  */
 @Singleton
 class SearchStateHolder @Inject constructor(
     private val musicRepository: MusicRepository,
+    private val extensionRepository: ExtensionRepository,
 ) {
     private companion object {
         const val SEARCH_DEBOUNCE_MS = 300L
+        const val MAX_EXTENSION_RESULTS_PER_SOURCE = 15
+    }
+
+    /** Fans the query out to every enabled extension; a failing extension is logged and skipped. */
+    private suspend fun searchExtensions(query: String): List<Song> {
+        val names = extensionRepository.extensions.value
+            .filter { it.isEnabled }
+            .associate { it.metadata.id to it.metadata.displayName }
+        if (names.isEmpty()) return emptyList()
+
+        return extensionRepository.searchAll(query).flatMap { (extensionId, result) ->
+            when (result) {
+                is ExtensionCallResult.Success ->
+                    result.value.tracks
+                        .take(MAX_EXTENSION_RESULTS_PER_SOURCE)
+                        .map { ExtensionSongMapper.toSong(extensionId, names[extensionId] ?: extensionId, it) }
+                is ExtensionCallResult.Failed -> {
+                    Timber.w("Extension search failed for %s: %s", extensionId, result.message)
+                    emptyList()
+                }
+            }
+        }
     }
 
     private data class SearchRequest(
@@ -142,7 +170,42 @@ class SearchStateHolder @Inject constructor(
                             return@collectLatest
                         }
 
-                        val finalResults = sortedLocalResults.toImmutableList()
+                        // Show local matches immediately; extension results are network-bound and
+                        // get appended once they arrive.
+                        val localOnly = sortedLocalResults.toImmutableList()
+                        _searchResults.value = localOnly
+
+                        val extensionSongs =
+                            if (
+                                currentFilter == SearchFilterType.ALL ||
+                                currentFilter == SearchFilterType.SONGS
+                            ) {
+                                withContext(Dispatchers.IO) { searchExtensions(normalizedQuery) }
+                            } else {
+                                emptyList()
+                            }
+
+                        if (
+                            request.requestId !=
+                            latestSearchRequestId.get()
+                        ) {
+                            return@collectLatest
+                        }
+
+                        val existingSongIds =
+                            sortedLocalResults
+                                .asSequence()
+                                .filterIsInstance<SearchResultItem.SongItem>()
+                                .map { it.song.id }
+                                .toHashSet()
+
+                        val finalResults =
+                            (
+                                sortedLocalResults +
+                                    extensionSongs
+                                        .filter { it.id !in existingSongIds }
+                                        .map { SearchResultItem.SongItem(it) }
+                                ).toImmutableList()
 
                         if (
                             request.requestId ==
@@ -151,7 +214,9 @@ class SearchStateHolder @Inject constructor(
                             _searchResults.value = finalResults
 
                             Timber.d(
-                                "Search complete: local=%d, query=%s",
+                                "Search complete: local=%d, extensions=%d, total=%d, query=%s",
+                                localOnly.size,
+                                extensionSongs.size,
                                 finalResults.size,
                                 normalizedQuery
                             )
