@@ -26,5 +26,5 @@ dependencies {
     compileOnly(project(":extension-api"))
 
     implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
-    implementation("com.squareup.okhttp3:okhttp:5.4.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
 }
